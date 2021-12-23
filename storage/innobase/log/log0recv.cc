@@ -1648,7 +1648,7 @@ dberr_t recv_sys_t::find_checkpoint()
     for (auto &&path : get_existing_log_files_paths())
     {
       recv_sys.files.emplace_back(std::move(path));
-      ut_a(recv_sys.files.back().open(true) == DB_SUCCESS);
+      recv_sys.files.back().open(true);
     }
     file_checkpoint= 0;
   }
@@ -1658,7 +1658,8 @@ dberr_t recv_sys_t::find_checkpoint()
   log_sys.next_checkpoint_lsn= 0;
   recovered_lsn= 0;
   byte *buf= my_assume_aligned<4096>(log_sys.buf);
-  log_sys.log.read(0, {buf, 4096});
+  if (!log_sys.is_pmem())
+    log_sys.log.read(0, {buf, 4096});
   /* Check the header page checksum. There was no
   checksum in the first redo log format (version 0). */
   log_sys.format= mach_read_from_4(buf + LOG_HEADER_FORMAT);
@@ -1723,7 +1724,10 @@ dberr_t recv_sys_t::find_checkpoint()
     for (size_t field= log_t::CHECKPOINT_1; field <= log_t::CHECKPOINT_2;
          field+= log_t::CHECKPOINT_2 - log_t::CHECKPOINT_1)
     {
-      log_sys.log.read(field, {buf, log_sys.get_block_size()});
+      if (log_sys.is_pmem())
+        buf= log_sys.buf + field;
+      else
+        log_sys.log.read(field, {buf, log_sys.get_block_size()});
       const lsn_t checkpoint_lsn{mach_read_from_8(buf)};
       const lsn_t end_lsn{mach_read_from_8(buf + 8)};
       if (checkpoint_lsn < first_lsn || end_lsn < checkpoint_lsn ||
@@ -3199,16 +3203,26 @@ static bool recv_scan_log(bool last_phase)
   const size_t block_size_1{log_sys.get_block_size() - 1};
 
   mysql_mutex_lock(&recv_sys.mutex);
-  recv_sys.len= 0;
-  recv_sys.recovered_offset=
-    size_t(recv_sys.recovered_lsn - log_sys.get_first_lsn()) & block_size_1;
   recv_sys.clear();
   ut_d(recv_sys.after_apply= last_phase);
   ut_ad(!last_phase || recv_sys.file_checkpoint);
 
   store_t store= last_phase
     ? STORE_IF_EXISTS : recv_sys.file_checkpoint ? STORE_YES : STORE_NO;
-  const size_t buf_size{log_sys.buf_size};
+  const size_t buf_size=
+    log_sys.is_pmem() ? size_t(log_sys.file_size) : log_sys.buf_size;
+  if (log_sys.is_pmem())
+  {
+    recv_sys.recovered_offset=
+      size_t(log_sys.calc_lsn_offset(recv_sys.recovered_lsn));
+    recv_sys.len= buf_size;
+  }
+  else
+  {
+    recv_sys.recovered_offset=
+      size_t(recv_sys.recovered_lsn - log_sys.get_first_lsn()) & block_size_1;
+    recv_sys.len= 0;
+  }
 
   for (ut_d(lsn_t source_offset= 0);;)
   {
@@ -3323,9 +3337,10 @@ static bool recv_scan_log(bool last_phase)
       break;
     }
 
-    if (recv_sys.recovered_offset > buf_size / 4 ||
-        (recv_sys.recovered_offset > block_size_1 &&
-         recv_sys.len >= buf_size - recv_sys.MTR_SIZE_MAX))
+    if (log_sys.is_pmem());
+    else if (recv_sys.recovered_offset > buf_size / 4 ||
+             (recv_sys.recovered_offset > block_size_1 &&
+              recv_sys.len >= buf_size - recv_sys.MTR_SIZE_MAX))
     {
       const size_t ofs{recv_sys.recovered_offset & ~block_size_1};
       memmove_aligned<64>(log_sys.buf, log_sys.buf + ofs, recv_sys.len - ofs);

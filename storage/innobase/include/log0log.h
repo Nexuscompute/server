@@ -132,50 +132,14 @@ or the MySQL version that created the redo log file. */
 #define LOG_HEADER_CREATOR_END	48
 /* @} */
 
-/** Abstraction for reading, writing and flushing file cache to disk */
-class file_io
-{
-public:
-  virtual ~file_io() noexcept {};
-  virtual dberr_t open(const char *path, bool read_only) noexcept= 0;
-  virtual dberr_t rename(const char *old_path,
-                         const char *new_path) noexcept= 0;
-  virtual dberr_t close() noexcept= 0;
-  virtual dberr_t read(os_offset_t offset, span<byte> buf) noexcept= 0;
-  virtual dberr_t write(const char *path, os_offset_t offset,
-                        span<const byte> buf) noexcept= 0;
-};
-
-class file_os_io final: public file_io
-{
-public:
-  file_os_io()= default;
-  file_os_io(const file_os_io &)= delete;
-  file_os_io &operator=(const file_os_io &)= delete;
-  file_os_io(file_os_io &&rhs);
-  file_os_io &operator=(file_os_io &&rhs);
-  ~file_os_io() noexcept;
-
-  dberr_t open(const char *path, bool read_only) noexcept final;
-  bool is_opened() const noexcept { return m_fd != OS_FILE_CLOSED; }
-  dberr_t rename(const char *old_path, const char *new_path) noexcept final;
-  dberr_t close() noexcept final;
-  dberr_t read(os_offset_t offset, span<byte> buf) noexcept final;
-  dberr_t write(const char *path, os_offset_t offset,
-                span<const byte> buf) noexcept final;
-
-private:
-  pfs_os_file_t m_fd{OS_FILE_CLOSED};
-};
-
 /** File abstraction + path */
 class log_file_t
 {
 public:
   log_file_t(std::string path= "") noexcept : m_path{std::move(path)} {}
 
-  dberr_t open(bool read_only) noexcept;
-  bool is_opened() const noexcept;
+  void open(bool read_only) noexcept;
+  bool is_opened() const noexcept { return m_file != OS_FILE_CLOSED; }
 
   const std::string &get_path() const noexcept { return m_path; }
 
@@ -188,9 +152,13 @@ public:
     m_path.clear();
     m_path.shrink_to_fit();
   }
+#ifdef HAVE_PMEM
+  byte *mmap(bool read_only, const struct stat &st) noexcept;
+#endif
 
 private:
-  std::unique_ptr<file_io> m_file;
+  friend class log_t;
+  pfs_os_file_t m_file{OS_FILE_CLOSED};
   std::string m_path;
 };
 
@@ -335,6 +303,12 @@ public:
 
   bool is_initialised() const noexcept { return max_buf_free != 0; }
 
+#ifdef HAVE_PMEM
+  bool is_pmem() const noexcept { return !flush_buf; }
+#else
+  static constexpr bool is_pmem() { return false; }
+#endif
+
   lsn_t get_lsn(std::memory_order order= std::memory_order_relaxed) const
   { return lsn.load(order); }
   void set_lsn(lsn_t lsn) { this->lsn.store(lsn, std::memory_order_release); }
@@ -398,7 +372,7 @@ public:
   { return (~FORMAT_ENCRYPTED & format) == FORMAT_10_8; }
 
   /** @return capacity in bytes */
-  lsn_t capacity() const{ return file_size - START_OFFSET; }
+  lsn_t capacity() const noexcept { return file_size - START_OFFSET; }
 
   /** Set the LSN of the log file at file creation. */
   void set_first_lsn(lsn_t lsn) noexcept { first_lsn= lsn; }
