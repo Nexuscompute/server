@@ -129,9 +129,6 @@ const char **spd_mysqld_unix_port;
 uint *spd_mysqld_port;
 bool volatile *spd_abort_loop;
 Time_zone *spd_tz_system;
-static int *spd_mysqld_server_started;
-static pthread_mutex_t *spd_LOCK_server_started;
-static pthread_cond_t *spd_COND_server_started;
 extern long spider_conn_mutex_id;
 handlerton *spider_hton_ptr;
 SPIDER_DBTON spider_dbton[SPIDER_DBTON_SIZE];
@@ -7024,13 +7021,6 @@ int spider_db_init(
 #else
     GetProcAddress(current_module, "?my_tz_SYSTEM@@3PAVTime_zone@@A");
 #endif
-  spd_mysqld_server_started = (int *)
-    GetProcAddress(current_module, "?mysqld_server_started@@3HA");
-  spd_LOCK_server_started = (pthread_mutex_t *)
-    GetProcAddress(current_module,
-      "?LOCK_server_started@@3Ust_mysql_mutex@@A");
-  spd_COND_server_started = (pthread_cond_t *)
-    GetProcAddress(current_module, "?COND_server_started@@3Ust_mysql_cond@@A");
 #else
 #ifndef SPIDER_HAS_NEXT_THREAD_ID
   spd_db_att_thread_id = &thread_id;
@@ -7053,9 +7043,6 @@ int spider_db_init(
   spd_mysqld_port = &mysqld_port;
   spd_abort_loop = &abort_loop;
   spd_tz_system = my_tz_SYSTEM;
-  spd_mysqld_server_started = &mysqld_server_started;
-  spd_LOCK_server_started = &LOCK_server_started;
-  spd_COND_server_started = &COND_server_started;
 #endif
 
 #ifdef HAVE_PSI_INTERFACE
@@ -10039,19 +10026,7 @@ void *spider_table_bg_sts_action(
     tmp_disable_binlog(thd);
     thd->security_ctx->skip_grants();
     thd->client_capabilities |= CLIENT_MULTI_RESULTS;
-    if (!(*spd_mysqld_server_started) && !thd->killed)
-    {
-      pthread_mutex_lock(spd_LOCK_server_started);
-      thd->mysys_var->current_cond = spd_COND_server_started;
-      thd->mysys_var->current_mutex = spd_LOCK_server_started;
-      if (!(*spd_mysqld_server_started) && !thd->killed)
-      {
-        pthread_cond_wait(spd_COND_server_started, spd_LOCK_server_started);
-      }
-      pthread_mutex_unlock(spd_LOCK_server_started);
-      thd->mysys_var->current_cond = &thread->cond;
-      thd->mysys_var->current_mutex = &thread->mutex;
-    }
+
     while (spider_init_queries[i].length && !thd->killed)
     {
       dispatch_command(COM_QUERY, thd, spider_init_queries[i].str,
