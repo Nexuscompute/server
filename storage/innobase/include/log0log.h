@@ -132,9 +132,14 @@ or the MySQL version that created the redo log file. */
 #define LOG_HEADER_CREATOR_END	48
 /* @} */
 
+struct log_t;
+
 /** File abstraction + path */
 class log_file_t
 {
+  friend log_t;
+  pfs_os_file_t m_file{OS_FILE_CLOSED};
+  std::string m_path;
 public:
   log_file_t(std::string path= "") noexcept : m_path{std::move(path)} {}
 
@@ -155,11 +160,6 @@ public:
 #ifdef HAVE_PMEM
   byte *mmap(bool read_only, const struct stat &st) noexcept;
 #endif
-
-private:
-  friend class log_t;
-  pfs_os_file_t m_file{OS_FILE_CLOSED};
-  std::string m_path;
 };
 
 /** Redo log buffer */
@@ -357,9 +357,9 @@ public:
   void append(const void *s, size_t size) noexcept
   {
     mysql_mutex_assert_owner(&mutex);
+    ut_ad(buf_free + size <= (is_pmem() ? file_size : buf_size));
     memcpy(buf + buf_free, s, size);
     buf_free+= size;
-    ut_ad(buf_free <= buf_size);
   }
 
   /** Set the log file format. */

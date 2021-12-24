@@ -3825,12 +3825,15 @@ read_only_recovery:
 	if (!srv_read_only_mode && log_sys.is_latest()) {
 		ut_ad(log_sys.get_flushed_lsn() == log_sys.get_lsn());
 		ut_ad(recv_sys.recovered_lsn == log_sys.get_lsn());
-		const size_t bs_1{log_sys.get_block_size() - 1};
-		memmove_aligned<64>(log_sys.buf, log_sys.buf
-				    + (recv_sys.recovered_offset & ~bs_1),
-				    (recv_sys.recovered_offset + bs_1)
-				    & ~bs_1);
-		log_sys.buf_free = recv_sys.recovered_offset &= bs_1;
+		if (!log_sys.is_pmem()) {
+			const size_t bs_1{log_sys.get_block_size() - 1};
+			const size_t ro{recv_sys.recovered_offset};
+			recv_sys.recovered_offset &= bs_1;
+			memmove_aligned<64>(log_sys.buf,
+					    log_sys.buf + (ro & ~bs_1),
+					    (ro + bs_1) & ~bs_1);
+		}
+		log_sys.buf_free = recv_sys.recovered_offset;
 		if (recv_needed_recovery
 		    && srv_operation == SRV_OPERATION_NORMAL) {
 			/* Write a FILE_CHECKPOINT marker as the first thing,
