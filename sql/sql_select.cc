@@ -3832,6 +3832,8 @@ mysql_select(THD *thd,
     }
   }
 
+  thd->get_stmt_da()->reset_current_row_for_warning();
+
   if ((err= join->optimize()))
   {
     goto err;					// 1
@@ -18972,7 +18974,7 @@ evaluate_join_record(JOIN *join, JOIN_TAB *join_tab,
   bool shortcut_for_distinct= join_tab->shortcut_for_distinct;
   ha_rows found_records=join->found_records;
   COND *select_cond= join_tab->select_cond;
-  bool select_cond_result= TRUE;
+  bool select_cond_result= TRUE, unlock_row= TRUE;
 
   DBUG_ENTER("evaluate_join_record");
   DBUG_PRINT("enter",
@@ -19124,10 +19126,10 @@ evaluate_join_record(JOIN *join, JOIN_TAB *join_tab,
 
     if (found)
     {
+      unlock_row= false;
       enum enum_nested_loop_state rc;
       /* A match from join_tab is found for the current partial join. */
       rc= (*join_tab->next_select)(join, join_tab+1, 0);
-      join->thd->get_stmt_da()->inc_current_row_for_warning();
       if (rc != NESTED_LOOP_OK && rc != NESTED_LOOP_NO_MORE_ROWS)
         DBUG_RETURN(rc);
       if (return_tab < join->return_tab)
@@ -19147,11 +19149,6 @@ evaluate_join_record(JOIN *join, JOIN_TAB *join_tab,
       if (shortcut_for_distinct && found_records != join->found_records)
         DBUG_RETURN(NESTED_LOOP_NO_MORE_ROWS);
     }
-    else
-    {
-      join->thd->get_stmt_da()->inc_current_row_for_warning();
-      join_tab->read_record.unlock_row(join_tab);
-    }
   }
   else
   {
@@ -19160,9 +19157,10 @@ evaluate_join_record(JOIN *join, JOIN_TAB *join_tab,
       with the beginning coinciding with the current partial join.
     */
     join->join_examined_rows++;
-    join->thd->get_stmt_da()->inc_current_row_for_warning();
-    join_tab->read_record.unlock_row(join_tab);
   }
+  join->thd->get_stmt_da()->inc_current_row_for_warning();
+  if (unlock_row)
+    join_tab->read_record.unlock_row(join_tab);
   DBUG_RETURN(NESTED_LOOP_OK);
 }
 
@@ -26945,6 +26943,12 @@ AGGR_OP::end_send()
   table->reginfo.lock_type= TL_UNLOCK;
 
   bool in_first_read= true;
+
+  /*
+     Reset the counter before copying rows from internal temporary table to
+     INSERT table.
+  */
+  join_tab->join->thd->get_stmt_da()->reset_current_row_for_warning();
   while (rc == NESTED_LOOP_OK)
   {
     int error;
@@ -26968,6 +26972,8 @@ AGGR_OP::end_send()
     else
     {
       rc= evaluate_join_record(join, join_tab, 0);
+      /* Increment the counter after copying rows. */
+      join_tab->join->thd->get_stmt_da()->inc_current_row_for_warning();
     }
   }
 
