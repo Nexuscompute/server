@@ -37,7 +37,6 @@ Created 12/9/1995 Heikki Tuuri
 #include "os0file.h"
 #include "span.h"
 #include "my_atomic_wrapper.h"
-#include <vector>
 #include <string>
 
 using st_::span;
@@ -49,9 +48,6 @@ static const char LOG_FILE_NAME[] = "ib_logfile0";
 @param[in]	filename	name of the redo log file
 @return path with log file name*/
 std::string get_log_file_path(const char *filename= LOG_FILE_NAME);
-
-/** Returns paths for all existing log files */
-std::vector<std::string> get_existing_log_files_paths();
 
 /** Delete log file.
 @param[in]	suffix	suffix of the file name */
@@ -134,29 +130,24 @@ or the MySQL version that created the redo log file. */
 
 struct log_t;
 
-/** File abstraction + path */
+/** File abstraction */
 class log_file_t
 {
   friend log_t;
-  pfs_os_file_t m_file{OS_FILE_CLOSED};
-  std::string m_path;
+  pfs_os_file_t m_file;
 public:
-  log_file_t(std::string path= "") noexcept : m_path{std::move(path)} {}
+  log_file_t()= default;
+  log_file_t(pfs_os_file_t file) noexcept : m_file(file) {}
 
-  void open(bool read_only) noexcept;
+  /** Open a file
+  @return file size in bytes
+  @retval 0 if not readable */
+  os_offset_t open(bool read_only) noexcept;
   bool is_opened() const noexcept { return m_file != OS_FILE_CLOSED; }
 
-  const std::string &get_path() const noexcept { return m_path; }
-
-  dberr_t rename(std::string new_path) noexcept;
   dberr_t close() noexcept;
   dberr_t read(os_offset_t offset, span<byte> buf) noexcept;
   dberr_t write(os_offset_t offset, span<const byte> buf) noexcept;
-  void free()
-  {
-    m_path.clear();
-    m_path.shrink_to_fit();
-  }
 #ifdef HAVE_PMEM
   byte *mmap(bool read_only, const struct stat &st) noexcept;
 #endif
@@ -239,28 +230,7 @@ public:
   /** format of the redo log: e.g., FORMAT_10_8 */
   uint32_t format;
   /** Log file */
-  class file {
-    /** log file */
-    log_file_t fd;
-  public:
-    /** opens log file which must be closed prior this call */
-    void open_file(std::string path);
-    /** opens log file which must be closed prior this call */
-    dberr_t rename(std::string path) { return fd.rename(path); }
-    /** reads buffer from log file
-    @param[in]	offset		offset in log file
-    @param[in]	buf		buffer where to read */
-    void read(os_offset_t offset, span<byte> buf);
-    /** writes buffer to log file
-    @param[in]	offset		offset in log file
-    @param[in]	buf		buffer from which to write */
-    void write(os_offset_t offset, span<const byte> buf);
-    /** closes log file */
-    void close_file();
-
-    /** Close the redo log buffer. */
-    void close() { close_file(); }
-  } log;
+  log_file_t log;
 
 	/** The fields involved in the log buffer flush @{ */
 
@@ -309,6 +279,12 @@ public:
   static constexpr bool is_pmem() { return false; }
 #endif
 
+  bool is_opened() const noexcept { return log.is_opened(); }
+
+  void attach(log_file_t file, os_offset_t size);
+
+  void close_file();
+
   lsn_t get_lsn(std::memory_order order= std::memory_order_relaxed) const
   { return lsn.load(order); }
   void set_lsn(lsn_t lsn) { this->lsn.store(lsn, std::memory_order_release); }
@@ -337,14 +313,12 @@ public:
   /** @return the physical block size of the storage */
   size_t get_block_size() const noexcept
   { ut_ad(block_size); return block_size; }
+  /** Set the log block size for file I/O. */
+  void set_block_size(uint32_t size) noexcept { block_size= size; }
 #else
   /** @return the physical block size of the storage */
   static size_t get_block_size() { return 512; }
 #endif
-
-  /** Set the log block size for file I/O. */
-  size_t set_block_size(uint32_t size) noexcept
-  { std::swap(size, block_size); return size; }
 
   /** Reserve space in the log buffer for appending data.
   @param size   upper limit of the length of the data to append(), in bytes

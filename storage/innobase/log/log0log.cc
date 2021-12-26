@@ -78,6 +78,8 @@ accommodate the number of OS threads in the database server */
 bool
 log_set_capacity(ulonglong file_size)
 {
+	mysql_mutex_assert_owner(&log_sys.mutex);
+
 	/* Margin for the free space in the smallest log, before a new query
 	step which modifies the database, is started */
 	const size_t LOG_CHECKPOINT_FREE_PER_THREAD = 4U
@@ -107,14 +109,10 @@ log_set_capacity(ulonglong file_size)
 	margin = smallest_capacity - free;
 	margin = margin - margin / 10;	/* Add still some extra safety */
 
-	mysql_mutex_lock(&log_sys.mutex);
-
 	log_sys.log_capacity = smallest_capacity;
 
 	log_sys.max_modified_age_async = margin - margin / 8;
 	log_sys.max_checkpoint_age = margin;
-
-	mysql_mutex_unlock(&log_sys.mutex);
 
 	return(true);
 }
@@ -174,17 +172,6 @@ void log_t::create()
   ut_ad(is_initialised());
 }
 
-void log_file_t::open(bool read_only) noexcept
-{
-  bool success;
-  ut_a(!is_opened());
-  m_file= os_file_create(innodb_log_file_key, m_path.c_str(),
-                       OS_FILE_OPEN, OS_FILE_NORMAL, OS_LOG_FILE,
-                       read_only, &success);
-  ut_ad(success);
-  ut_a(m_file != OS_FILE_CLOSED);
-}
-
 dberr_t log_file_t::close() noexcept
 {
   ut_a(is_opened());
@@ -193,16 +180,6 @@ dberr_t log_file_t::close() noexcept
     return DB_ERROR;
 
   m_file= OS_FILE_CLOSED;
-  return DB_SUCCESS;
-}
-
-dberr_t log_file_t::rename(std::string new_path) noexcept
-{
-  if (IF_WIN(!MoveFileEx(m_path.c_str(), new_path.c_str(),
-                         MOVEFILE_REPLACE_EXISTING),
-             ::rename(m_path.c_str(), new_path.c_str())))
-    return DB_ERROR;
-  m_path= std::move(new_path);
   return DB_SUCCESS;
 }
 
@@ -215,7 +192,7 @@ dberr_t log_file_t::read(os_offset_t offset, span<byte> buf) noexcept
 dberr_t log_file_t::write(os_offset_t offset, span<const byte> buf) noexcept
 {
   ut_ad(is_opened());
-  return os_file_write(IORequestWrite, m_path.c_str(), m_file,
+  return os_file_write(IORequestWrite, "ib_logfile0", m_file,
                        buf.data(), offset, buf.size());
 }
 
@@ -223,50 +200,65 @@ dberr_t log_file_t::write(os_offset_t offset, span<const byte> buf) noexcept
 # include <libpmem.h>
 #endif
 
-void log_t::file::open_file(std::string path)
+void log_t::attach(log_file_t file, os_offset_t size)
 {
-  const bool read_only(srv_read_only_mode);
-  fd= log_file_t(std::move(path));
-  fd.open(read_only);
+  log= file;
+  ut_ad(size >= START_OFFSET + SIZE_OF_FILE_CHECKPOINT);
+  file_size= size;
+
 #ifdef HAVE_PMEM
-  ut_ad(!log_sys.buf);
-  ut_ad(!log_sys.flush_buf);
-  struct stat st;
-  ut_a(!fstat(fd.m_file, &st));
-  log_sys.file_size= st.st_size;
-  if (!(st.st_size & 4095))
+  ut_ad(!buf);
+  ut_ad(!flush_buf);
+  if (!(size_t(size) & 4095))
   {
-    const size_t size(st.st_size);
     void *ptr=
-      my_mmap(0, size, read_only ? PROT_READ : PROT_READ | PROT_WRITE,
-              MAP_SHARED_VALIDATE | MAP_SYNC, fd.m_file, 0);
+      my_mmap(0, size_t(size), read_only ? PROT_READ : PROT_READ | PROT_WRITE,
+              MAP_SHARED_VALIDATE | MAP_SYNC, log.m_file, 0);
 #if 0 && defined __linux__
     if (ptr == MAP_FAILED)
     {
-      const auto st_dev= st.st_dev;
-      if (!stat("/dev/shm", &st) && st.st_dev == st_dev)
-        ptr= my_mmap(0, size, read_only ? PROT_READ : PROT_READ | PROT_WRITE,
-                     MAP_SHARED, fd.m_file, 0);
+      struct stat st;
+      if (!fstat(log.m_file, &st))
+      {
+        const auto st_dev= st.st_dev;
+        if (!stat("/dev/shm", &st) && st.st_dev == st_dev)
+          ptr= my_mmap(0, size_t(size),
+                       read_only ? PROT_READ : PROT_READ | PROT_WRITE,
+                       MAP_SHARED, log.m_file, 0);
+      }
     }
 #endif /* __linux__ */
     if (ptr != MAP_FAILED)
     {
-      fd.close();
-      log_sys.buf= static_cast<byte*>(ptr);
+      log.close();
+      buf= static_cast<byte*>(ptr);
+      sql_print_information("InnoDB: Memory-mapped log (%zu bytes)",
+                            size_t(size));
+#if defined __linux__ || defined _WIN32
+      set_block_size(CPU_LEVEL1_DCACHE_LINESIZE);
+#endif
       return;
     }
   }
-  log_sys.buf= static_cast<byte*>(ut_malloc_dontdump(log_sys.buf_size,
+  buf= static_cast<byte*>(ut_malloc_dontdump(buf_size,
                                                      PSI_INSTRUMENT_ME));
-  TRASH_ALLOC(log_sys.buf, log_sys.buf_size);
-  log_sys.flush_buf= static_cast<byte*>(ut_malloc_dontdump(log_sys.buf_size,
+  TRASH_ALLOC(buf, buf_size);
+  flush_buf= static_cast<byte*>(ut_malloc_dontdump(buf_size,
                                                            PSI_INSTRUMENT_ME));
-  TRASH_ALLOC(log_sys.flush_buf, log_sys.buf_size);
-  const size_t bs{log_sys.get_block_size()};
-  log_sys.checkpoint_buf= static_cast<byte*>(aligned_malloc(bs, bs));
-  memset_aligned<64>(log_sys.checkpoint_buf, 0, bs);
-#else
-  log_sys.file_size= os_file_get_size(fd.m_file);
+  TRASH_ALLOC(flush_buf, buf_size);
+#endif
+
+#if defined __linux__ || defined _WIN32
+  if (block_size)
+    sql_print_information("InnoDB: File system buffers for log"
+                          " disabled (block size=%u bytes)", block_size);
+  else
+    set_block_size(512);
+#endif
+
+#ifdef HAVE_PMEM
+  checkpoint_buf= static_cast<byte*>(aligned_malloc(block_size, block_size));
+  memset_aligned<64>(checkpoint_buf, 0, block_size);
 #endif
 }
 
@@ -325,50 +317,31 @@ void log_t::create(lsn_t lsn) noexcept
   }
 }
 
-void log_t::file::read(os_offset_t offset, span<byte> buf)
-{
-  ut_ad(!(offset & (log_sys.get_block_size() - 1)));
-  if (const dberr_t err= fd.read(offset, buf))
-    ib::fatal() << "read(" << fd.get_path() << ") returned "<< err;
-}
-
-void log_t::file::write(os_offset_t offset, span<const byte> buf)
-{
-  srv_stats.os_log_pending_writes.inc();
-  if (const dberr_t err= fd.write(offset, buf))
-    ib::fatal() << "write(" << fd.get_path() << ") returned " << err;
-  srv_stats.os_log_pending_writes.dec();
-  srv_stats.os_log_written.add(buf.size());
-  srv_stats.log_writes.inc();
-  log_sys.n_log_ios++;
-}
-
-void log_t::file::close_file()
+void log_t::close_file()
 {
 #ifdef HAVE_PMEM
-  if (log_sys.is_pmem())
+  if (is_pmem())
   {
-    ut_ad(!fd.is_opened());
-    ut_ad(!log_sys.checkpoint_buf);
-    if (log_sys.buf)
+    ut_ad(!is_opened());
+    ut_ad(!checkpoint_buf);
+    if (buf)
     {
-      my_munmap(log_sys.buf, log_sys.file_size);
-      log_sys.buf= nullptr;
+      my_munmap(buf, file_size);
+      buf= nullptr;
     }
     return;
   }
 
-  ut_free_dodump(log_sys.buf, log_sys.buf_size);
-  log_sys.buf= nullptr;
-  ut_free_dodump(log_sys.flush_buf, log_sys.buf_size);
-  log_sys.flush_buf= nullptr;
-  aligned_free(log_sys.checkpoint_buf);
-  log_sys.checkpoint_buf= nullptr;
+  ut_free_dodump(buf, buf_size);
+  buf= nullptr;
+  ut_free_dodump(flush_buf, buf_size);
+  flush_buf= nullptr;
+  aligned_free(checkpoint_buf);
+  checkpoint_buf= nullptr;
 #endif
-  if (fd.is_opened())
-    if (const dberr_t err= fd.close())
-      ib::fatal() << "close(" << fd.get_path() << ") returned " << err;
-  fd.free();                                    // Free path
+  if (is_opened())
+    if (const dberr_t err= log.close())
+      ib::fatal() << "closing ib_logfile0 failed: " << err;
 }
 
 static group_commit_lock write_lock;
@@ -1035,7 +1008,7 @@ void log_t::close()
 {
   ut_ad(this == &log_sys);
   if (!is_initialised()) return;
-  log.close();
+  close_file();
 
 #ifndef HAVE_PMEM
   ut_free_dodump(buf, buf_size);
@@ -1078,24 +1051,4 @@ std::string get_log_file_path(const char *filename)
   path.append(filename);
 
   return path;
-}
-
-std::vector<std::string> get_existing_log_files_paths() {
-  std::vector<std::string> result;
-
-  for (int i= 0; i < 101; i++) {
-    auto path= get_log_file_path(LOG_FILE_NAME_PREFIX)
-                                 .append(std::to_string(i));
-    os_file_stat_t stat;
-    dberr_t err= os_file_get_status(path.c_str(), &stat, false, true);
-    if (err)
-      break;
-
-    if (stat.type != OS_FILE_TYPE_FILE)
-      break;
-
-    result.push_back(std::move(path));
-  }
-
-  return result;
 }

@@ -1467,28 +1467,6 @@ static bool recv_check_log_block(const byte *buf)
     my_crc32c(0, buf, 508);
 }
 
-static bool redo_file_sizes_are_correct()
-{
-  auto paths= get_existing_log_files_paths();
-  auto get_size= [](const std::string &path) {
-    return os_file_get_size(path.c_str()).m_total_size;
-  };
-  os_offset_t size= get_size(paths[0]);
-
-  auto it=
-      std::find_if(paths.begin(), paths.end(), [&](const std::string &path) {
-        return get_size(path) != size;
-      });
-
-  if (it == paths.end())
-    return true;
-
-  sql_print_error("InnoDB: Log file %.*s is of different size " UINT64PF
-                  " bytes than other log files " UINT64PF " bytes!",
-                  int(it->size()), it->data(), get_size(*it), size);
-  return false;
-}
-
 /** Calculate the checksum for a log block using the pre-10.2.2 algorithm. */
 inline uint32_t log_block_calc_checksum_format_0(const byte *b)
 {
@@ -1643,18 +1621,52 @@ static dberr_t recv_log_recover_10_5(lsn_t lsn_offset)
 
 dberr_t recv_sys_t::find_checkpoint()
 {
+  bool wrong_size= false;
+
   if (files.empty())
   {
-    for (auto &&path : get_existing_log_files_paths())
-    {
-      recv_sys.files.emplace_back(std::move(path));
-      recv_sys.files.back().open(true);
-    }
     file_checkpoint= 0;
+    std::string path{get_log_file_path()};
+    bool success;
+    pfs_os_file_t file= os_file_create(innodb_log_file_key, path.c_str(),
+                                       OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT,
+                                       OS_FILE_NORMAL, OS_LOG_FILE,
+                                       srv_read_only_mode, &success);
+    if (file == OS_FILE_CLOSED)
+      return DB_ERROR;
+    const os_offset_t size{os_file_get_size(file)};
+    if (size < log_t::START_OFFSET + SIZE_OF_FILE_CHECKPOINT)
+    {
+      os_file_close(file);
+      sql_print_error("InnoDB: File %.*s is too small",
+                      int(path.size()), path.data());
+      return DB_ERROR;
+    }
+
+    log_sys.attach(file, size);
+    recv_sys.files.emplace_back(file);
+    for (int i= 1; i < 101; i++)
+    {
+      path= get_log_file_path(LOG_FILE_NAME_PREFIX).append(std::to_string(i));
+      file= os_file_create(innodb_log_file_key, path.c_str(),
+                           OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT |
+                           OS_FILE_ON_ERROR_SILENT,
+                           OS_FILE_NORMAL, OS_LOG_FILE, true, &success);
+      if (file == OS_FILE_CLOSED)
+        break;
+      const os_offset_t sz{os_file_get_size(file)};
+      if (size != sz)
+      {
+        sql_print_error("InnoDB: Log file %.*s is of different size " UINT64PF
+                        " bytes than other log files " UINT64PF " bytes!",
+                        int(path.size()), path.data(), sz, size);
+        wrong_size= true;
+      }
+      recv_sys.files.emplace_back(file);
+    }
   }
   else
     ut_ad(srv_operation == SRV_OPERATION_BACKUP);
-  const bool correct_sizes{redo_file_sizes_are_correct()};
   log_sys.next_checkpoint_lsn= 0;
   recovered_lsn= 0;
   byte *buf= my_assume_aligned<4096>(log_sys.buf);
@@ -1665,7 +1677,7 @@ dberr_t recv_sys_t::find_checkpoint()
   log_sys.format= mach_read_from_4(buf + LOG_HEADER_FORMAT);
   if (log_sys.format == log_t::FORMAT_3_23)
   {
-    if (!correct_sizes)
+    if (wrong_size)
       return DB_CORRUPTION;
     if (dberr_t err= recv_log_recover_pre_10_2())
       return err;
@@ -1808,7 +1820,7 @@ dberr_t recv_sys_t::find_checkpoint()
     return DB_ERROR;
   }
 
-  if (!correct_sizes)
+  if (wrong_size)
     return DB_CORRUPTION;
 
   if (dberr_t err= recv_log_recover_10_5(lsn_offset))
@@ -3663,7 +3675,6 @@ of first system tablespace page
 dberr_t recv_recovery_from_checkpoint_start()
 {
 	bool		rescan = false;
-	dberr_t		err = DB_SUCCESS;
 
 	ut_ad(srv_operation == SRV_OPERATION_NORMAL
 	      || srv_operation == SRV_OPERATION_RESTORE
@@ -3683,9 +3694,17 @@ dberr_t recv_recovery_from_checkpoint_start()
 
 	mysql_mutex_lock(&log_sys.mutex);
 
-	if (dberr_t err = recv_sys.find_checkpoint()) {
+	dberr_t err = recv_sys.find_checkpoint();
+        if (err != DB_SUCCESS) {
+early_exit:
 		mysql_mutex_unlock(&log_sys.mutex);
-		return(err);
+		return err;
+	}
+
+	if (!log_set_capacity(srv_log_file_size)) {
+err_exit:
+		err = DB_ERROR;
+		goto early_exit;
 	}
 
 	/* Start reading the log from the checkpoint lsn. The variable
@@ -3695,8 +3714,7 @@ dberr_t recv_recovery_from_checkpoint_start()
 	ut_ad(recv_sys.pages.empty());
 
 	if (log_sys.format == log_t::FORMAT_3_23) {
-		mysql_mutex_unlock(&log_sys.mutex);
-		return DB_SUCCESS;
+		goto early_exit;
 	}
 
 	if (log_sys.is_latest()) {
@@ -3707,16 +3725,15 @@ dberr_t recv_recovery_from_checkpoint_start()
 		recv_scan_log(false);
 		if (recv_needed_recovery) {
 read_only_recovery:
-			mysql_mutex_unlock(&log_sys.mutex);
 			sql_print_warning("InnoDB: innodb_read_only"
 					  " prevents crash recovery");
-			return DB_READ_ONLY;
+			err = DB_READ_ONLY;
+			goto early_exit;
 		}
 		if (recv_sys.is_corrupt_log()) {
-			mysql_mutex_unlock(&log_sys.mutex);
 			sql_print_error("InnoDB: Log scan aborted at LSN "
 					LSN_PF, recv_sys.recovered_lsn);
-			return DB_ERROR;
+                        goto err_exit;
 		}
 		ut_ad(recv_sys.file_checkpoint);
 		if (rewind) {
@@ -3733,8 +3750,7 @@ read_only_recovery:
 
 		if ((recv_sys.is_corrupt_log() && !srv_force_recovery)
 		    || recv_sys.is_corrupt_fs()) {
-			mysql_mutex_unlock(&log_sys.mutex);
-			return DB_ERROR;
+			goto err_exit;
 		}
 	}
 
@@ -3744,12 +3760,11 @@ read_only_recovery:
 	if (recv_needed_recovery) {
 		bool missing_tablespace = false;
 
-		dberr_t err = recv_init_crash_recovery_spaces(
+		err = recv_init_crash_recovery_spaces(
 			rescan, missing_tablespace);
 
 		if (err != DB_SUCCESS) {
-			mysql_mutex_unlock(&log_sys.mutex);
-			return(err);
+			goto early_exit;
 		}
 
 		/* If there is any missing tablespace and rescan is needed
@@ -3769,14 +3784,15 @@ read_only_recovery:
 
 			missing_tablespace = false;
 
-			err = recv_sys.is_corrupt_log()
-				? DB_ERROR
-				: recv_validate_tablespace(
-					rescan, missing_tablespace);
+			if (recv_sys.is_corrupt_log()) {
+				goto err_exit;
+			}
+
+			err = recv_validate_tablespace(
+				rescan, missing_tablespace);
 
 			if (err != DB_SUCCESS) {
-				mysql_mutex_unlock(&log_sys.mutex);
-				return err;
+				goto early_exit;
 			}
 
 			rescan = true;
@@ -3795,8 +3811,7 @@ read_only_recovery:
 			if ((recv_sys.is_corrupt_log()
 			     && !srv_force_recovery)
 			    || recv_sys.is_corrupt_fs()) {
-				mysql_mutex_unlock(&log_sys.mutex);
-				return(DB_ERROR);
+				goto err_exit;
 			}
 		}
 	} else {
@@ -3818,8 +3833,7 @@ read_only_recovery:
 	}
 
 	if (recv_sys.recovered_lsn < log_sys.next_checkpoint_lsn) {
-		mysql_mutex_unlock(&log_sys.mutex);
-		return DB_ERROR;
+		goto err_exit;
 	}
 
 	if (!srv_read_only_mode && log_sys.is_latest()) {

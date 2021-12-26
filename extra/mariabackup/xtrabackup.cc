@@ -2181,7 +2181,7 @@ static bool innodb_init()
   ut_ad(recv_no_log_write);
   buf_flush_sync();
   DBUG_ASSERT(!buf_pool.any_io_pending());
-  log_sys.log.close();
+  log_sys.close_file();
 
   if (xtrabackup_incremental)
     /* Reset the ib_logfile0 in --target-dir, not --incremental-dir. */
@@ -4475,27 +4475,6 @@ fail:
 		goto fail;
 	}
 
-	log_sys.create();
-	log_sys.log.open_file(get_log_file_path());
-
-	/* create extra LSN dir if it does not exist. */
-	if (xtrabackup_extra_lsndir
-		&&!my_stat(xtrabackup_extra_lsndir,&stat_info,MYF(0))
-		&& (my_mkdir(xtrabackup_extra_lsndir,0777,MYF(0)) < 0)) {
-		msg("Error: cannot mkdir %d: %s\n",
-		    my_errno, xtrabackup_extra_lsndir);
-		goto fail;
-	}
-
-	/* create target dir if not exist */
-	if (!xtrabackup_stream_str && !my_stat(xtrabackup_target_dir,&stat_info,MYF(0))
-		&& (my_mkdir(xtrabackup_target_dir,0777,MYF(0)) < 0)){
-		msg("Error: cannot mkdir %d: %s\n",
-		    my_errno, xtrabackup_target_dir);
-		goto fail;
-	}
-
-
 	if (auto b = aligned_malloc(UNIV_PAGE_SIZE_MAX, 4096)) {
 		field_ref_zero = static_cast<byte*>(
 			memset_aligned<4096>(b, 0, UNIV_PAGE_SIZE_MAX));
@@ -4503,8 +4482,7 @@ fail:
 		goto fail;
 	}
 
-        {
-
+	log_sys.create();
 	/* get current checkpoint_lsn */
 
 	mysql_mutex_lock(&log_sys.mutex);
@@ -4526,6 +4504,23 @@ free_and_fail:
 
 	recv_needed_recovery = true;
 	mysql_mutex_unlock(&log_sys.mutex);
+
+	/* create extra LSN dir if it does not exist. */
+	if (xtrabackup_extra_lsndir
+		&&!my_stat(xtrabackup_extra_lsndir,&stat_info,MYF(0))
+		&& (my_mkdir(xtrabackup_extra_lsndir,0777,MYF(0)) < 0)) {
+		msg("Error: cannot mkdir %d: %s\n",
+		    my_errno, xtrabackup_extra_lsndir);
+		goto free_and_fail;
+	}
+
+	/* create target dir if not exist */
+	if (!xtrabackup_stream_str && !my_stat(xtrabackup_target_dir,&stat_info,MYF(0))
+		&& (my_mkdir(xtrabackup_target_dir,0777,MYF(0)) < 0)){
+		msg("Error: cannot mkdir %d: %s\n",
+		    my_errno, xtrabackup_target_dir);
+		goto free_and_fail;
+	}
 
 	xtrabackup_init_datasinks();
 
@@ -4637,7 +4632,6 @@ free_and_fail:
 
 	pthread_mutex_destroy(&count_mutex);
 	free(data_threads);
-	}
 
 	bool ok = backup_start(corrupted_pages);
 
