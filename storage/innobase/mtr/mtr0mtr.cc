@@ -799,6 +799,22 @@ inline lsn_t log_t::append_prepare(size_t size) noexcept
   throttle:
     set_check_flush_or_checkpoint();
 
+  if (is_pmem())
+  {
+    for (ut_d(int count= 50); capacity() - size <
+           size_t(lsn - flushed_to_disk_lsn.load(std::memory_order_relaxed)); )
+    {
+      mysql_mutex_unlock(&mutex);
+      DEBUG_SYNC_C("log_buf_size_exceeded");
+      log_write_up_to(lsn, nullptr);
+      srv_stats.log_waits.inc();
+      ut_ad(count--);
+      mysql_mutex_lock(&mutex);
+      lsn= get_lsn();
+    }
+    return lsn;
+  }
+
   /* Calculate the amount of free space needed. */
   size= (4 * 4096) - size + log_sys.buf_size;
 
@@ -806,7 +822,7 @@ inline lsn_t log_t::append_prepare(size_t size) noexcept
   {
     mysql_mutex_unlock(&mutex);
     DEBUG_SYNC_C("log_buf_size_exceeded");
-    log_buffer_flush_to_disk();
+    log_write_up_to(lsn, nullptr);
     srv_stats.log_waits.inc();
     ut_ad(count--);
     mysql_mutex_lock(&mutex);
