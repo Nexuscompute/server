@@ -1891,23 +1891,19 @@ os_file_get_last_error_low(
 			<< "Operating system error number " << err
 			<< " in a file operation.";
 
-		if (err == ERROR_PATH_NOT_FOUND) {
-			ib::error()
-				<< "The error means the system"
-				" cannot find the path specified.";
-
-		} else if (err == ERROR_ACCESS_DENIED) {
-
+		switch (err) {
+		case ERROR_PATH_NOT_FOUND:
+			break;
+		case ERROR_ACCESS_DENIED:
 			ib::error()
 				<< "The error means mariadbd does not have"
 				" the access rights to"
 				" the directory. It may also be"
 				" you have created a subdirectory"
 				" of the same name as a data file.";
-
-		} else if (err == ERROR_SHARING_VIOLATION
-			   || err == ERROR_LOCK_VIOLATION) {
-
+			break;
+		case ERROR_SHARING_VIOLATION:
+		case ERROR_LOCK_VIOLATION:
 			ib::error()
 				<< "The error means that another program"
 				" is using InnoDB's files."
@@ -1915,25 +1911,23 @@ os_file_get_last_error_low(
 				" software or another instance"
 				" of MariaDB."
 				" Please close it to get rid of this error.";
-
-		} else if (err == ERROR_WORKING_SET_QUOTA
-			   || err == ERROR_NO_SYSTEM_RESOURCES) {
-
+			break;
+		case ERROR_WORKING_SET_QUOTA:
+		case ERROR_NO_SYSTEM_RESOURCES:
 			ib::error()
 				<< "The error means that there are no"
 				" sufficient system resources or quota to"
 				" complete the operation.";
-
-		} else if (err == ERROR_OPERATION_ABORTED) {
-
+			break;
+		case ERROR_OPERATION_ABORTED:
 			ib::error()
 				<< "The error means that the I/O"
 				" operation has been aborted"
 				" because of either a thread exit"
 				" or an application request."
 				" Retry attempt is made.";
-		} else {
-
+			break;
+		default:
 			ib::info() << OPERATING_SYSTEM_ERROR_MSG;
 		}
 	}

@@ -3345,14 +3345,18 @@ static bool recv_scan_log(bool last_phase)
       }
     }
 
-  read_more:
     if (r != recv_sys_t::PREMATURE_EOF)
     {
       ut_ad(r == recv_sys_t::GOT_EOF);
       break;
     }
 
-    if (log_sys.is_pmem());
+  read_more:
+    if (log_sys.is_pmem())
+    {
+      sql_print_error("FIXME: wrap-around not handled yet");
+      abort();
+    }
     else if (recv_sys.recovered_offset > buf_size / 4 ||
              (recv_sys.recovered_offset > block_size_1 &&
               recv_sys.len >= buf_size - recv_sys.MTR_SIZE_MAX))
