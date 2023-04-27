@@ -2268,11 +2268,11 @@ ROLLBACK/*!*/;
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=0/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C utf8mb3 *//*!*/;
-SET @@session.character_set_client=33,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
+SET @@session.character_set_client=utf8mb3,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
 SET @@session.lc_time_names=0/*!*/;
 SET @@session.collation_database=DEFAULT/*!*/;
 CREATE TABLE t1 (
@@ -5300,11 +5300,11 @@ ROLLBACK/*!*/;
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=0/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C utf8mb3 *//*!*/;
-SET @@session.character_set_client=33,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
+SET @@session.character_set_client=utf8mb3,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
 SET @@session.lc_time_names=0/*!*/;
 SET @@session.collation_database=DEFAULT/*!*/;
 CREATE TABLE t1 (
@@ -5706,11 +5706,11 @@ ROLLBACK/*!*/;
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=0/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C utf8mb3 *//*!*/;
-SET @@session.character_set_client=33,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
+SET @@session.character_set_client=utf8mb3,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
 SET @@session.lc_time_names=0/*!*/;
 SET @@session.collation_database=DEFAULT/*!*/;
 CREATE TABLE t1 (
@@ -6354,11 +6354,11 @@ ROLLBACK/*!*/;
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=0/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C utf8mb3 *//*!*/;
-SET @@session.character_set_client=33,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
+SET @@session.character_set_client=utf8mb3,@@session.collation_connection=33,@@session.collation_server=X/*!*/;
 SET @@session.lc_time_names=0/*!*/;
 SET @@session.collation_database=DEFAULT/*!*/;
 CREATE TABLE t1 (
@@ -6413,3 +6413,29 @@ ROLLBACK /* added by mysqlbinlog */;
 # Cleanup.
 #
 DROP TABLE t1;
+#
+# Beginning of 10.2 test
+#
+# MDEV-25460: Assertion `!is_set() || (m_status == DA_OK_BULK &&
+# is_bulk_op())' failed in Diagnostics_area::set_ok_status in my_ok
+# from mysql_sql_stmt_prepare
+#
+CREATE TEMPORARY TABLE a (c INT) ENGINE=InnoDB;
+Warnings:
+Warning	1286	Unknown storage engine 'InnoDB'
+Warning	1266	Using storage engine MyISAM for table 'a'
+CREATE TABLE b (c INT) ENGINE=InnoDB;
+Warnings:
+Warning	1286	Unknown storage engine 'InnoDB'
+Warning	1266	Using storage engine MyISAM for table 'b'
+PREPARE s FROM 'SET STATEMENT binlog_format=ROW FOR SELECT * FROM b';
+ERROR HY000: Cannot switch out of the row-based binary log format when the session has open temporary tables
+DROP TABLE b;
+DROP TEMPORARY TABLE a;
+CREATE TEMPORARY TABLE t (c INT);
+PREPARE s FROM 'SET STATEMENT binlog_format=ROW FOR SELECT 1';
+ERROR HY000: Cannot switch out of the row-based binary log format when the session has open temporary tables
+DROP TEMPORARY TABLE t;
+#
+# End of 10.2 test
+#

@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -63,6 +63,7 @@ struct row_file_summary_by_instance
 class table_file_summary_by_instance : public PFS_engine_table
 {
 public:
+  static PFS_engine_table_share_state m_share_state;
   /** Table share */
   static PFS_engine_table_share m_share;
   static PFS_engine_table* create();
@@ -82,8 +83,7 @@ private:
   table_file_summary_by_instance();
 
 public:
-  ~table_file_summary_by_instance()
-  {}
+  ~table_file_summary_by_instance() = default;
 
 private:
   void make_row(PFS_file *pfs);

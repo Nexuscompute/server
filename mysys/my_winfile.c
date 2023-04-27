@@ -102,6 +102,42 @@ static int my_get_open_flags(File fd)
   DBUG_RETURN(my_file_info[fd].oflag);
 }
 
+/*
+  CreateFile with retry logic.
+
+  Uses retries, to avoid or reduce CreateFile errors
+  with ERROR_SHARING_VIOLATION, in case the file is opened
+  by another process, which used incompatible sharing
+  flags when opening.
+
+  See Windows' CreateFile() documentation for details.
+*/
+static HANDLE my_create_file_with_retries(
+  LPCSTR lpFileName, DWORD dwDesiredAccess,
+  DWORD dwShareMode,
+  LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+  DWORD dwCreationDisposition,
+  DWORD dwFlagsAndAttributes,
+  HANDLE hTemplateFile)
+{
+  int retries;
+  DBUG_INJECT_FILE_SHARING_VIOLATION(lpFileName);
+
+  for (retries = FILE_SHARING_VIOLATION_RETRIES;;)
+  {
+    HANDLE h= CreateFile(lpFileName, dwDesiredAccess, dwShareMode,
+                         lpSecurityAttributes, dwCreationDisposition,
+                         dwFlagsAndAttributes, hTemplateFile);
+    DBUG_CLEAR_FILE_SHARING_VIOLATION();
+
+    if (h != INVALID_HANDLE_VALUE ||
+        GetLastError() != ERROR_SHARING_VIOLATION || --retries == 0)
+      return h;
+
+    Sleep(FILE_SHARING_VIOLATION_DELAY_MS);
+  }
+  return INVALID_HANDLE_VALUE;
+}
 
 /*
   Default security attributes for files and directories
@@ -262,16 +298,15 @@ File my_win_sopen(const char *path, int oflag, int shflag, int pmode)
     fileattrib|= FILE_FLAG_RANDOM_ACCESS;
 
   /* try to open/create the file  */
-  if ((osfh= CreateFile(path, fileaccess, fileshare,my_win_file_secattr(),
+  if ((osfh= my_create_file_with_retries(path, fileaccess, fileshare,my_win_file_secattr(),
     filecreate, fileattrib, NULL)) == INVALID_HANDLE_VALUE)
   {
-    /*
-       OS call to open/create file failed! map the error, release
-       the lock, and return -1. note that it's not necessary to
-       call _free_osfhnd (it hasn't been used yet).
-    */
-    my_osmaperr(GetLastError());     /* map error */
-    DBUG_RETURN(-1);                 /* return error to caller */
+    DWORD last_error= GetLastError();
+    if (last_error == ERROR_PATH_NOT_FOUND && strlen(path) >= MAX_PATH)
+      errno= ENAMETOOLONG;
+    else
+      my_osmaperr(last_error);     /* map error */
+    DBUG_RETURN(-1);
   }
 
   if ((fh= my_open_osfhandle(osfh, 

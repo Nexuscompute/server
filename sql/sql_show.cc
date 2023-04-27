@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2021, MariaDB
+   Copyright (c) 2009, 2023, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1072,7 +1072,8 @@ public:
       my_snprintf(m_view_access_denied_message, MYSQL_ERRMSG_SIZE,
                   ER_THD(thd, ER_TABLEACCESS_DENIED_ERROR), "SHOW VIEW",
                   m_sctx->priv_user,
-                  m_sctx->host_or_ip, m_top_view->get_table_name());
+                  m_sctx->host_or_ip,
+                  m_top_view->get_db_name(), m_top_view->get_table_name());
     }
     return m_view_access_denied_message_ptr;
   }
@@ -1164,7 +1165,8 @@ mysqld_show_create_get_fields(THD *thd, TABLE_LIST *table_list,
       DBUG_PRINT("debug", ("check_table_access failed"));
       my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0),
               "SHOW", thd->security_ctx->priv_user,
-              thd->security_ctx->host_or_ip, table_list->alias.str);
+              thd->security_ctx->host_or_ip,
+              table_list->db.str, table_list->alias.str);
       goto exit;
     }
     DBUG_PRINT("debug", ("check_table_access succeeded"));
@@ -1193,7 +1195,8 @@ mysqld_show_create_get_fields(THD *thd, TABLE_LIST *table_list,
     {
       my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0),
               "SHOW", thd->security_ctx->priv_user,
-              thd->security_ctx->host_or_ip, table_list->alias.str);
+              thd->security_ctx->host_or_ip,
+              table_list->db.str, table_list->alias.str);
       goto exit;
     }
   }
@@ -1456,7 +1459,7 @@ bool mysqld_show_create_db(THD *thd, LEX_CSTRING *dbname,
     buffer.append(STRING_WITH_LEN(" /*!40100"));
     buffer.append(STRING_WITH_LEN(" DEFAULT CHARACTER SET "));
     buffer.append(create.default_table_charset->cs_name);
-    if (!(create.default_table_charset->state & MY_CS_PRIMARY))
+    if (Charset(create.default_table_charset).can_have_collate_clause())
     {
       buffer.append(STRING_WITH_LEN(" COLLATE "));
       buffer.append(create.default_table_charset->coll_name);
@@ -1916,7 +1919,7 @@ static void add_table_options(THD *thd, TABLE *table,
     {
       packet->append(STRING_WITH_LEN(" DEFAULT CHARSET="));
       packet->append(share->table_charset->cs_name);
-      if (!(share->table_charset->state & MY_CS_PRIMARY))
+      if (Charset(table->s->table_charset).can_have_collate_clause())
       {
         packet->append(STRING_WITH_LEN(" COLLATE="));
         packet->append(table->s->table_charset->coll_name);
@@ -2202,20 +2205,11 @@ int show_create_table_ex(THD *thd, TABLE_LIST *table_list,
       {
 	packet->append(STRING_WITH_LEN(" CHARACTER SET "));
 	packet->append(field->charset()->cs_name);
-      }
-      /*
-	For string types dump collation name only if
-	collation is not primary for the given charset
-
-        For generated fields don't print the COLLATE clause if
-        the collation matches the expression's collation.
-      */
-      if (!(field->charset()->state & MY_CS_PRIMARY) &&
-          (!field->vcol_info ||
-           field->charset() != field->vcol_info->expr->collation.collation))
-      {
-	packet->append(STRING_WITH_LEN(" COLLATE "));
-	packet->append(field->charset()->coll_name);
+        if (Charset(field->charset()).can_have_collate_clause())
+        {
+          packet->append(STRING_WITH_LEN(" COLLATE "));
+          packet->append(field->charset()->coll_name);
+        }
       }
     }
 
@@ -2369,6 +2363,9 @@ int show_create_table_ex(THD *thd, TABLE_LIST *table_list,
         packet->append_parenthesized((long) key_part->length /
                                       key_part->field->charset()->mbmaxlen);
       }
+      if (table->file->index_flags(i, j, 0) & HA_READ_ORDER &&
+          key_part->key_part_flag & HA_REVERSE_SORT) /* same in SHOW KEYS */
+        packet->append(STRING_WITH_LEN(" DESC"));
     }
 
     if (key_info->without_overlaps)
@@ -2455,7 +2452,7 @@ int show_create_table_ex(THD *thd, TABLE_LIST *table_list,
     add_table_options(thd, table, create_info_arg,
                       table_list->schema_table != 0, 0, packet);
 
-  if (table->versioned())
+  if (!DBUG_IF("sysvers_hide") && table->versioned())
     packet->append(STRING_WITH_LEN(" WITH SYSTEM VERSIONING"));
 
 #ifdef WITH_PARTITION_STORAGE_ENGINE
@@ -2636,7 +2633,8 @@ static int show_create_view(THD *thd, TABLE_LIST *table, String *buff)
          tbl;
          tbl= tbl->next_global)
     {
-      if (cmp(&table->view_db, tbl->view ? &tbl->view_db : &tbl->db))
+      if (!tbl->is_derived() &&
+          cmp(&table->view_db, tbl->view ? &tbl->view_db : &tbl->db))
       {
         table->compact_view_format= FALSE;
         break;
@@ -2663,7 +2661,8 @@ static int show_create_view(THD *thd, TABLE_LIST *table, String *buff)
     a different syntax, like when ANSI_QUOTES is defined.
   */
   table->view->unit.print(buff, enum_query_type(QT_VIEW_INTERNAL |
-                                                QT_ITEM_ORIGINAL_FUNC_NULLIF));
+                                                QT_ITEM_ORIGINAL_FUNC_NULLIF |
+                                                QT_NO_WRAPPERS_FOR_TVC_IN_VIEW));
 
   if (table->with_check != VIEW_CHECK_NONE)
   {
@@ -3593,6 +3592,7 @@ union Any_pointer {
   @param variable    [in]     Details of the variable.
   @param value_type  [in]     Variable type.
   @param show_type   [in]     Variable show type.
+  @param status_var  [in]     Status variable pointer
   @param charset     [out]    Character set of the value.
   @param buff        [in,out] Buffer to store the value.
                               (Needs to have enough memory
@@ -5102,7 +5102,8 @@ end:
   */
   DBUG_ASSERT(thd->open_tables == NULL);
   thd->mdl_context.rollback_to_savepoint(open_tables_state_backup->mdl_system_tables_svp);
-  thd->clear_error();
+  if (!thd->is_fatal_error)
+    thd->clear_error();
   return res;
 }
 
@@ -5152,6 +5153,7 @@ public:
 
 int get_all_tables(THD *thd, TABLE_LIST *tables, COND *cond)
 {
+  DBUG_ENTER("get_all_tables");
   LEX *lex= thd->lex;
   TABLE *table= tables->table;
   TABLE_LIST table_acl_check;
@@ -5169,7 +5171,29 @@ int get_all_tables(THD *thd, TABLE_LIST *tables, COND *cond)
   uint table_open_method= tables->table_open_method;
   bool can_deadlock;
   MEM_ROOT tmp_mem_root;
-  DBUG_ENTER("get_all_tables");
+  /*
+    We're going to open FRM files for tables.
+    In case of VIEWs that contain stored function calls,
+    these stored functions will be parsed and put to the SP cache.
+
+    Suppose we have a view containing a stored function call:
+      CREATE VIEW v1 AS SELECT f1() AS c1;
+    and now we're running:
+      SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME=f1();
+    If a parallel thread invalidates the cache,
+    e.g. by creating or dropping some stored routine,
+    the SELECT query will re-parse f1() when processing "v1"
+    and replace the outdated cached version of f1() to a new one.
+    But the old version of f1() is referenced from the m_sp member
+    of the Item_func_sp instances used in the WHERE condition.
+    We cannot destroy it. To avoid such clashes, let's remember
+    all old routines into a temporary SP cache collection
+    and process tables with a new empty temporary SP cache collection.
+    Then restore to the old SP cache collection at the end.
+  */
+  Sp_caches old_sp_caches;
+
+  old_sp_caches.sp_caches_swap(*thd);
 
   bzero(&tmp_mem_root, sizeof(tmp_mem_root));
 
@@ -5318,6 +5342,8 @@ int get_all_tables(THD *thd, TABLE_LIST *tables, COND *cond)
               error= 0;
               goto err;
             }
+            if (thd->is_fatal_error)
+              goto err;
 
             DEBUG_SYNC(thd, "before_open_in_get_all_tables");
             if (fill_schema_table_by_open(thd, &tmp_mem_root, FALSE,
@@ -5342,6 +5368,13 @@ int get_all_tables(THD *thd, TABLE_LIST *tables, COND *cond)
 err:
   thd->restore_backup_open_tables_state(&open_tables_state_backup);
   free_root(&tmp_mem_root, 0);
+
+  /*
+    Now restore to the saved SP cache collection
+    and clear the temporary SP cache collection.
+  */
+  old_sp_caches.sp_caches_swap(*thd);
+  old_sp_caches.sp_caches_clear();
 
   DBUG_RETURN(error);
 }
@@ -6025,6 +6058,15 @@ static int get_schema_column_record(THD *thd, TABLE_LIST *tables,
   show_table->use_all_columns();               // Required for default
   restore_record(show_table, s->default_values);
 
+#ifndef NO_EMBEDDED_ACCESS_CHECKS
+  check_access(thd, SELECT_ACL, db_name->str,
+               &tables->grant.privilege, 0, 0, MY_TEST(tables->schema_table));
+  if (is_temporary_table(tables))
+  {
+    tables->grant.privilege|= TMP_TABLE_ACLS;
+  }
+#endif
+
   for (; (field= *ptr) ; ptr++)
   {
     if(field->invisible > INVISIBLE_USER)
@@ -6044,14 +6086,13 @@ static int get_schema_column_record(THD *thd, TABLE_LIST *tables,
     restore_record(table, s->default_values);
 
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
-    ulonglong col_access;
-    check_access(thd,SELECT_ACL, db_name->str,
-                 &tables->grant.privilege, 0, 0, MY_TEST(tables->schema_table));
-    col_access= get_column_grant(thd, &tables->grant,
-                                 db_name->str, table_name->str,
-                                 field->field_name.str) & COL_ACLS;
-    if (!tables->schema_table && !col_access)
+    ulonglong col_access=
+      get_column_grant(thd, &tables->grant, db_name->str, table_name->str,
+                       field->field_name.str) & COL_ACLS;
+
+    if (!col_access && !tables->schema_table)
       continue;
+
     char *end= tmp;
     for (uint bitnr=0; col_access ; col_access>>=1,bitnr++)
     {
@@ -6993,19 +7034,18 @@ static int get_check_constraints_record(THD *thd, TABLE_LIST *tables,
 #ifndef NO_EMBEDDED_ACCESS_CHECKS
     TABLE_LIST table_acl_check;
     bzero((char*) &table_acl_check, sizeof(table_acl_check));
+
+    if (!(thd->col_access & TABLE_ACLS))
+    {
+      table_acl_check.db= *db_name;
+      table_acl_check.table_name= *table_name;
+      table_acl_check.grant.privilege= thd->col_access;
+      if (check_grant(thd, TABLE_ACLS, &table_acl_check, FALSE, 1, TRUE))
+        DBUG_RETURN(res);
+    }
 #endif
     for (uint i= 0; i < tables->table->s->table_check_constraints; i++)
     {
-#ifndef NO_EMBEDDED_ACCESS_CHECKS
-      if (!(thd->col_access & TABLE_ACLS))
-      {
-        table_acl_check.db= *db_name;
-        table_acl_check.table_name= *table_name;
-        table_acl_check.grant.privilege= thd->col_access;
-        if (check_grant(thd, TABLE_ACLS, &table_acl_check, FALSE, 1, TRUE))
-          continue;
-      }
-#endif
       Virtual_column_info *check= tables->table->check_constraints[i];
       table->field[0]->store(STRING_WITH_LEN("def"), system_charset_info);
       table->field[3]->store(check->name.str, check->name.length,
@@ -7130,13 +7170,14 @@ static bool store_trigger(THD *thd, Trigger *trigger,
   table->field[14]->store(STRING_WITH_LEN("OLD"), cs);
   table->field[15]->store(STRING_WITH_LEN("NEW"), cs);
 
-  if (trigger->create_time)
+  if (trigger->hr_create_time.val)
   {
+    /* timestamp is in microseconds */
     table->field[16]->set_notnull();
-    thd->variables.time_zone->gmt_sec_to_TIME(&timestamp,
-                                              (my_time_t)(trigger->create_time/100));
-    /* timestamp is with 6 digits */
-    timestamp.second_part= (trigger->create_time % 100) * 10000;
+    thd->variables.time_zone->
+      gmt_sec_to_TIME(&timestamp,
+                      (my_time_t) hrtime_to_time(trigger->hr_create_time));
+    timestamp.second_part= hrtime_sec_part(trigger->hr_create_time);
     table->field[16]->store_time_dec(&timestamp, 2);
   }
 
@@ -8199,27 +8240,34 @@ TABLE *create_schema_table(THD *thd, TABLE_LIST *table_list)
   TABLE *table;
   ST_SCHEMA_TABLE *schema_table= table_list->schema_table;
   ST_FIELD_INFO *fields= schema_table->fields_info;
-  bool need_all_fieds= table_list->schema_table_reformed || // SHOW command
+  bool need_all_fields= table_list->schema_table_reformed || // SHOW command
                        thd->lex->only_view_structure(); // need table structure
+  bool keep_row_order;
+  TMP_TABLE_PARAM *tmp_table_param;
+  SELECT_LEX *select_lex;
   DBUG_ENTER("create_schema_table");
 
   for (; !fields->end_marker(); fields++)
     field_count++;
 
-  TMP_TABLE_PARAM *tmp_table_param = new (thd->mem_root) TMP_TABLE_PARAM;
+  tmp_table_param = new (thd->mem_root) TMP_TABLE_PARAM;
   tmp_table_param->init();
   tmp_table_param->table_charset= system_charset_info;
   tmp_table_param->field_count= field_count;
   tmp_table_param->schema_table= 1;
-  SELECT_LEX *select_lex= table_list->select_lex;
-  bool keep_row_order= is_show_command(thd);
-  if (!(table= create_tmp_table_for_schema(thd, tmp_table_param, *schema_table,
-                 (select_lex->options | thd->variables.option_bits | TMP_TABLE_ALL_COLUMNS),
-                  table_list->alias, !need_all_fieds, keep_row_order)))
+  select_lex= table_list->select_lex;
+  keep_row_order= is_show_command(thd);
+  if (!(table=
+        create_tmp_table_for_schema(thd, tmp_table_param, *schema_table,
+                                    (select_lex->options |
+                                     thd->variables.option_bits |
+                                     TMP_TABLE_ALL_COLUMNS),
+                                    table_list->alias, !need_all_fields,
+                                    keep_row_order)))
     DBUG_RETURN(0);
   my_bitmap_map* bitmaps=
     (my_bitmap_map*) thd->alloc(bitmap_buffer_size(field_count));
-  my_bitmap_init(&table->def_read_set, (my_bitmap_map*) bitmaps, field_count);
+  my_bitmap_init(&table->def_read_set, bitmaps, field_count);
   table->read_set= &table->def_read_set;
   bitmap_clear_all(table->read_set);
   table_list->schema_table_param= tmp_table_param;
@@ -8642,6 +8690,7 @@ bool optimize_schema_tables_memory_usage(List<TABLE_LIST> &tables)
         if (bitmap_is_set(table->read_set, i))
         {
           field->move_field(cur);
+          field->reset();
           *to_recinfo++= *from_recinfo;
           cur+= from_recinfo->length;
         }
@@ -8663,6 +8712,7 @@ bool optimize_schema_tables_memory_usage(List<TABLE_LIST> &tables)
         to_recinfo->type= FIELD_NORMAL;
         to_recinfo++;
       }
+      store_record(table, s->default_values);
       p->recinfo= to_recinfo;
 
       // TODO switch from Aria to Memory if all blobs were optimized away?
@@ -9048,7 +9098,7 @@ ST_FIELD_INFO columns_fields_info[]=
   Column("ORDINAL_POSITION",        ULonglong(), NOT_NULL,          OPEN_FRM_ONLY),
   Column("COLUMN_DEFAULT", Longtext(MAX_FIELD_VARCHARLENGTH),
                                                  NULLABLE, "Default",OPEN_FRM_ONLY),
-  Column("IS_NULLABLE",             Yesno(),     NOT_NULL, "Null",  OPEN_FRM_ONLY),
+  Column("IS_NULLABLE",          Yes_or_empty(), NOT_NULL, "Null",  OPEN_FRM_ONLY),
   Column("DATA_TYPE",               Name(),      NOT_NULL,          OPEN_FRM_ONLY),
   Column("CHARACTER_MAXIMUM_LENGTH",ULonglong(), NULLABLE,          OPEN_FRM_ONLY),
   Column("CHARACTER_OCTET_LENGTH",  ULonglong(), NULLABLE,          OPEN_FRM_ONLY),
@@ -9059,7 +9109,7 @@ ST_FIELD_INFO columns_fields_info[]=
   Column("COLLATION_NAME",          CSName(),    NULLABLE, "Collation", OPEN_FRM_ONLY),
   Column("COLUMN_TYPE",         Longtext(65535), NOT_NULL, "Type",  OPEN_FRM_ONLY),
   Column("COLUMN_KEY",              Varchar(3),  NOT_NULL, "Key",   OPEN_FRM_ONLY),
-  Column("EXTRA",                   Varchar(30), NOT_NULL, "Extra", OPEN_FRM_ONLY),
+  Column("EXTRA",                   Varchar(80), NOT_NULL, "Extra", OPEN_FRM_ONLY),
   Column("PRIVILEGES",              Varchar(80), NOT_NULL, "Privileges", OPEN_FRM_ONLY),
   Column("COLUMN_COMMENT", Varchar(COLUMN_COMMENT_MAXLEN), NOT_NULL, "Comment",
                                                                  OPEN_FRM_ONLY),
@@ -9085,8 +9135,8 @@ ST_FIELD_INFO collation_fields_info[]=
   Column("COLLATION_NAME",               CSName(),     NOT_NULL, "Collation"),
   Column("CHARACTER_SET_NAME",           CSName(),     NOT_NULL, "Charset"),
   Column("ID", SLonglong(MY_INT32_NUM_DECIMAL_DIGITS), NOT_NULL, "Id"),
-  Column("IS_DEFAULT",                   Yesno(),      NOT_NULL, "Default"),
-  Column("IS_COMPILED",                  Yesno(),      NOT_NULL, "Compiled"),
+  Column("IS_DEFAULT",                 Yes_or_empty(), NOT_NULL, "Default"),
+  Column("IS_COMPILED",                Yes_or_empty(), NOT_NULL, "Compiled"),
   Column("SORTLEN",                      SLonglong(3), NOT_NULL, "Sortlen"),
   CEnd()
 };
@@ -9094,10 +9144,10 @@ ST_FIELD_INFO collation_fields_info[]=
 
 ST_FIELD_INFO applicable_roles_fields_info[]=
 {
-  Column("GRANTEE",                  Userhost(), NOT_NULL),
+  Column("GRANTEE",                  Userhost(),     NOT_NULL),
   Column("ROLE_NAME", Varchar(USERNAME_CHAR_LENGTH), NOT_NULL),
-  Column("IS_GRANTABLE",             Yesno(),    NOT_NULL),
-  Column("IS_DEFAULT",               Yesno(),    NULLABLE),
+  Column("IS_GRANTABLE",             Yes_or_empty(), NOT_NULL),
+  Column("IS_DEFAULT",               Yes_or_empty(), NULLABLE),
   CEnd()
 };
 
@@ -9220,7 +9270,7 @@ ST_FIELD_INFO stat_fields_info[]=
   Column("INDEX_NAME",    Name(),      NOT_NULL, "Key_name",    OPEN_FRM_ONLY),
   Column("SEQ_IN_INDEX",  SLonglong(2),NOT_NULL, "Seq_in_index",OPEN_FRM_ONLY),
   Column("COLUMN_NAME",   Name(),      NOT_NULL, "Column_name", OPEN_FRM_ONLY),
-  Column("COLLATION",     Varchar(1),  NULLABLE, "Collation",   OPEN_FRM_ONLY),
+  Column("COLLATION",     Varchar(1),  NULLABLE, "Collation",   OPEN_FULL_TABLE),
   Column("CARDINALITY",   SLonglong(), NULLABLE, "Cardinality", OPEN_FULL_TABLE),
   Column("SUB_PART",      SLonglong(3),NULLABLE, "Sub_part",    OPEN_FRM_ONLY),
   Column("PACKED",        Varchar(10), NULLABLE, "Packed",      OPEN_FRM_ONLY),
@@ -9241,7 +9291,7 @@ ST_FIELD_INFO view_fields_info[]=
   Column("TABLE_NAME",           Name(),     NOT_NULL, OPEN_FRM_ONLY),
   Column("VIEW_DEFINITION", Longtext(65535), NOT_NULL, OPEN_FRM_ONLY),
   Column("CHECK_OPTION",         Varchar(8), NOT_NULL, OPEN_FRM_ONLY),
-  Column("IS_UPDATABLE",         Yesno(),    NOT_NULL, OPEN_FULL_TABLE),
+  Column("IS_UPDATABLE",     Yes_or_empty(), NOT_NULL, OPEN_FULL_TABLE),
   Column("DEFINER",              Definer(),  NOT_NULL, OPEN_FRM_ONLY),
   Column("SECURITY_TYPE",        Varchar(7), NOT_NULL, OPEN_FRM_ONLY),
   Column("CHARACTER_SET_CLIENT", CSName(),   NOT_NULL, OPEN_FRM_ONLY),
@@ -9253,46 +9303,46 @@ ST_FIELD_INFO view_fields_info[]=
 
 ST_FIELD_INFO user_privileges_fields_info[]=
 {
-  Column("GRANTEE",        Userhost(), NOT_NULL),
-  Column("TABLE_CATALOG",  Catalog(),  NOT_NULL),
-  Column("PRIVILEGE_TYPE", Name(),     NOT_NULL),
-  Column("IS_GRANTABLE",   Yesno(),    NOT_NULL),
+  Column("GRANTEE",        Userhost(),     NOT_NULL),
+  Column("TABLE_CATALOG",  Catalog(),      NOT_NULL),
+  Column("PRIVILEGE_TYPE", Name(),         NOT_NULL),
+  Column("IS_GRANTABLE",   Yes_or_empty(), NOT_NULL),
   CEnd()
 };
 
 
 ST_FIELD_INFO schema_privileges_fields_info[]=
 {
-  Column("GRANTEE",        Userhost(), NOT_NULL),
-  Column("TABLE_CATALOG",  Catalog(),  NOT_NULL),
-  Column("TABLE_SCHEMA",   Name(),     NOT_NULL),
-  Column("PRIVILEGE_TYPE", Name(),     NOT_NULL),
-  Column("IS_GRANTABLE",   Yesno(),    NOT_NULL),
+  Column("GRANTEE",        Userhost(),     NOT_NULL),
+  Column("TABLE_CATALOG",  Catalog(),      NOT_NULL),
+  Column("TABLE_SCHEMA",   Name(),         NOT_NULL),
+  Column("PRIVILEGE_TYPE", Name(),         NOT_NULL),
+  Column("IS_GRANTABLE",   Yes_or_empty(), NOT_NULL),
   CEnd()
 };
 
 
 ST_FIELD_INFO table_privileges_fields_info[]=
 {
-  Column("GRANTEE",        Userhost(), NOT_NULL),
-  Column("TABLE_CATALOG",  Catalog(),  NOT_NULL),
-  Column("TABLE_SCHEMA",   Name(),     NOT_NULL),
-  Column("TABLE_NAME",     Name(),     NOT_NULL),
-  Column("PRIVILEGE_TYPE", Name(),     NOT_NULL),
-  Column("IS_GRANTABLE",   Yesno(),    NOT_NULL),
+  Column("GRANTEE",        Userhost(),     NOT_NULL),
+  Column("TABLE_CATALOG",  Catalog(),      NOT_NULL),
+  Column("TABLE_SCHEMA",   Name(),         NOT_NULL),
+  Column("TABLE_NAME",     Name(),         NOT_NULL),
+  Column("PRIVILEGE_TYPE", Name(),         NOT_NULL),
+  Column("IS_GRANTABLE",   Yes_or_empty(), NOT_NULL),
   CEnd()
 };
 
 
 ST_FIELD_INFO column_privileges_fields_info[]=
 {
-  Column("GRANTEE",        Userhost(), NOT_NULL),
-  Column("TABLE_CATALOG",  Catalog(),  NOT_NULL),
-  Column("TABLE_SCHEMA",   Name(),     NOT_NULL),
-  Column("TABLE_NAME",     Name(),     NOT_NULL),
-  Column("COLUMN_NAME",    Name(),     NOT_NULL),
-  Column("PRIVILEGE_TYPE", Name(),     NOT_NULL),
-  Column("IS_GRANTABLE",   Yesno(),    NOT_NULL),
+  Column("GRANTEE",        Userhost(),     NOT_NULL),
+  Column("TABLE_CATALOG",  Catalog(),      NOT_NULL),
+  Column("TABLE_SCHEMA",   Name(),         NOT_NULL),
+  Column("TABLE_NAME",     Name(),         NOT_NULL),
+  Column("COLUMN_NAME",    Name(),         NOT_NULL),
+  Column("PRIVILEGE_TYPE", Name(),         NOT_NULL),
+  Column("IS_GRANTABLE",   Yes_or_empty(), NOT_NULL),
   CEnd()
 };
 
@@ -9433,7 +9483,7 @@ ST_FIELD_INFO sysvars_fields_info[]=
   Column("NUMERIC_MAX_VALUE",    Varchar(MY_INT64_NUM_DECIMAL_DIGITS), NULLABLE),
   Column("NUMERIC_BLOCK_SIZE",   Varchar(MY_INT64_NUM_DECIMAL_DIGITS), NULLABLE),
   Column("ENUM_VALUE_LIST",      Longtext(65535),                  NULLABLE),
-  Column("READ_ONLY",            Yesno(),                          NOT_NULL),
+  Column("READ_ONLY",            Yes_or_empty(),                   NOT_NULL),
   Column("COMMAND_LINE_ARGUMENT",Name(),                           NULLABLE),
   Column("GLOBAL_VALUE_PATH",    Varchar(2048),                    NULLABLE),
   CEnd()
@@ -9941,12 +9991,14 @@ static bool show_create_trigger_impl(THD *thd, Trigger *trigger)
 
   p->store(&trigger->db_cl_name, system_charset_info);
 
-  if (trigger->create_time)
+  if (trigger->hr_create_time.val)
   {
     MYSQL_TIME timestamp;
-    thd->variables.time_zone->gmt_sec_to_TIME(&timestamp,
-                                              (my_time_t)(trigger->create_time/100));
-    timestamp.second_part= (trigger->create_time % 100) * 10000;
+    thd->variables.time_zone->
+      gmt_sec_to_TIME(&timestamp,
+                      (my_time_t)
+                      hrtime_to_time(trigger->hr_create_time));
+    timestamp.second_part= hrtime_sec_part(trigger->hr_create_time);
     p->store_datetime(&timestamp, 2);
   }
   else
@@ -10112,11 +10164,9 @@ exit:
 class IS_internal_schema_access : public ACL_internal_schema_access
 {
 public:
-  IS_internal_schema_access()
-  {}
+  IS_internal_schema_access() = default;
 
-  ~IS_internal_schema_access()
-  {}
+  ~IS_internal_schema_access() = default;
 
   ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;

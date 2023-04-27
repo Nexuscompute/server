@@ -2,12 +2,12 @@
 
 if (!$kill_signal)
 {
---let $kill_signal = 9
+--let $kill_signal = KILL
 }
 
 # Write file to make mysql-test-run.pl expect the crash, but don't start it
---let $_server_id= `SELECT @@server_id`
---let $_expect_file_name= $MYSQLTEST_VARDIR/tmp/mysqld.$_server_id.expect
+--let $_expect_file_name= `select regexp_replace(@@tmpdir, '^.*/','')`
+--let $_expect_file_name= $MYSQLTEST_VARDIR/tmp/$_expect_file_name.expect
 --exec echo "wait" > $_expect_file_name
 
 # Kill the connected server

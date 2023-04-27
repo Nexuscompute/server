@@ -390,7 +390,7 @@ Rdb_key_def::~Rdb_key_def() {
   m_pack_info = nullptr;
 }
 
-void Rdb_key_def::setup(const TABLE *const tbl,
+uint Rdb_key_def::setup(const TABLE *const tbl,
                         const Rdb_tbl_def *const tbl_def) {
   DBUG_ASSERT(tbl != nullptr);
   DBUG_ASSERT(tbl_def != nullptr);
@@ -406,7 +406,7 @@ void Rdb_key_def::setup(const TABLE *const tbl,
     RDB_MUTEX_LOCK_CHECK(m_mutex);
     if (m_maxlength != 0) {
       RDB_MUTEX_UNLOCK_CHECK(m_mutex);
-      return;
+      return HA_EXIT_SUCCESS;
     }
 
     KEY *key_info = nullptr;
@@ -487,6 +487,14 @@ void Rdb_key_def::setup(const TABLE *const tbl,
       /* this loop also loops over the 'extended key' tail */
       for (uint src_i = 0; src_i < m_key_parts; src_i++, keypart_to_set++) {
         Field *const field = key_part ? key_part->field : nullptr;
+
+        if (key_part && key_part->key_part_flag & HA_REVERSE_SORT)
+        {
+          my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0),
+                   "ROCKSDB", "DESC");
+          RDB_MUTEX_UNLOCK_CHECK(m_mutex);
+          return HA_EXIT_FAILURE;
+        }
 
         if (simulating_extkey && !hidden_pk_exists) {
           DBUG_ASSERT(secondary_key);
@@ -591,6 +599,7 @@ void Rdb_key_def::setup(const TABLE *const tbl,
 
     RDB_MUTEX_UNLOCK_CHECK(m_mutex);
   }
+  return HA_EXIT_SUCCESS;
 }
 
 /*
@@ -3131,10 +3140,10 @@ static const Rdb_collation_codec *rdb_init_collation_mapping(
           }
         }
 
-        cur->m_make_unpack_info_func = {Rdb_key_def::make_unpack_simple_varchar,
-                                        Rdb_key_def::make_unpack_simple};
-        cur->m_unpack_func = {Rdb_key_def::unpack_simple_varchar_space_pad,
-                              Rdb_key_def::unpack_simple};
+        cur->m_make_unpack_info_func = {{Rdb_key_def::make_unpack_simple_varchar,
+                                         Rdb_key_def::make_unpack_simple}};
+        cur->m_unpack_func = {{Rdb_key_def::unpack_simple_varchar_space_pad,
+                               Rdb_key_def::unpack_simple}};
       } else {
         // Out of luck for now.
       }
@@ -5266,6 +5275,12 @@ void Rdb_dict_manager::log_start_drop_index(GL_INDEX_ID gl_index_id,
           "from index id (%u,%u). MyRocks data dictionary may "
           "get corrupted.",
           gl_index_id.cf_id, gl_index_id.index_id);
+      if (rocksdb_ignore_datadic_errors)
+      {
+        sql_print_error("RocksDB: rocksdb_ignore_datadic_errors=1, "
+                        "trying to continue");
+        return;
+      }
       abort();
     }
   }

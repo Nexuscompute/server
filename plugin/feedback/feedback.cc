@@ -102,7 +102,6 @@ static COND* make_cond(THD *thd, TABLE_LIST *tables, LEX_STRING *filter)
   if (!filter->str || !nrc)
     return 0;
 
-  nrc->init();
   nrc->resolve_in_table_list_only(tables);
   nrc->select_lex= tables->select_lex;
 
@@ -367,7 +366,7 @@ static MYSQL_SYSVAR_STR(user_info, user_info,
        NULL, NULL, "");
 static MYSQL_SYSVAR_STR(url, url, PLUGIN_VAR_READONLY | PLUGIN_VAR_RQCMDARG,
        "Space separated URLs to send the feedback report to.", NULL, NULL,
-       DEFAULT_PROTO "mariadb.org/feedback_plugin/post");
+       DEFAULT_PROTO "feedback.mariadb.org/rest/v1/post");
 static MYSQL_SYSVAR_ULONG(send_timeout, send_timeout, PLUGIN_VAR_RQCMDARG,
        "Timeout (in seconds) for the sending the report.",
        NULL, NULL, 60, 1, 60*60*24, 1);

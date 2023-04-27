@@ -79,6 +79,10 @@ struct Vers_part_info : public Sql_alloc
   partition_element *hist_part;
 };
 
+/*
+  See generate_partition_syntax() for details of how the data is used
+  in partition expression.
+*/
 class partition_info : public DDL_LOG_STATE, public Sql_alloc
 {
 public:
@@ -88,6 +92,10 @@ public:
   List<partition_element> partitions;
   List<partition_element> temp_partitions;
 
+  /*
+    These are mutually exclusive with part_expr/subpart_expr depending on
+    what is specified in partitioning filter: expression or column list.
+  */
   List<const char> part_field_list;
   List<const char> subpart_field_list;
   
@@ -324,12 +332,11 @@ public:
     part_field_list.empty();
     subpart_field_list.empty();
   }
-  ~partition_info() {}
+  ~partition_info() = default;
 
-  partition_info *get_clone(THD *thd);
+  partition_info *get_clone(THD *thd, bool empty_data_and_index_file= FALSE);
   bool set_named_partition_bitmap(const char *part_name, size_t length);
   bool set_partition_bitmaps(List<String> *partition_names);
-  bool set_partition_bitmaps_from_table(TABLE_LIST *table_list);
   /* Answers the question if subpartitioning is used for a certain table */
   bool is_sub_partitioned()
   {
@@ -400,7 +407,13 @@ public:
     vers_info->limit= limit;
     return !limit;
   }
-  void vers_set_hist_part(THD *thd);
+  bool vers_require_hist_part(THD *thd) const
+  {
+    return part_type == VERSIONING_PARTITION &&
+      thd->lex->vers_history_generating();
+  }
+  int vers_set_hist_part(THD *thd);
+  void vers_check_limit(THD *thd);
   bool vers_fix_field_list(THD *thd);
   void vers_update_el_ids();
   partition_element *get_partition(uint part_id)
@@ -415,7 +428,12 @@ public:
     return NULL;
   }
   uint next_part_no(uint new_parts) const;
+
+  int gen_part_type(THD *thd, String *str) const;
 };
+
+void part_type_error(THD *thd, partition_info *work_part_info,
+                     const char *part_type, partition_info *tab_part_info);
 
 uint32 get_next_partition_id_range(struct st_partition_iter* part_iter);
 bool check_partition_dirs(partition_info *part_info);

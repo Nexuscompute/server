@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2017, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -1692,6 +1692,15 @@ typedef void (*set_thread_info_v1_t)(const char* info, uint info_len);
 */
 typedef void (*set_thread_v1_t)(struct PSI_thread *thread);
 
+/**
+  Assign the remote (peer) port to the instrumented thread.
+
+  @param thread    pointer to the thread instrumentation
+  @param port      the remote port
+*/
+typedef void (*set_thread_peer_port_v1_t)(PSI_thread *thread,
+                                          unsigned int port);
+
 /** Delete the current thread instrumentation. */
 typedef void (*delete_current_thread_v1_t)(void);
 
@@ -2375,7 +2384,7 @@ typedef void (*execute_prepared_stmt_v1_t)
   (PSI_statement_locker *locker, PSI_prepared_stmt* prepared_stmt);
 
 /**
-  Set the statement text for a prepared statment event.
+  Set the statement text for a prepared statement event.
   @param prepared_stmt prepared statement.
   @param text the prepared statement text
   @param text_len the prepared statement text length
@@ -2737,6 +2746,8 @@ struct PSI_v1
 
   start_metadata_wait_v1_t start_metadata_wait;
   end_metadata_wait_v1_t end_metadata_wait;
+
+  set_thread_peer_port_v1_t set_thread_peer_port;
 };
 
 /** @} (end of group Group_PSI_v1) */

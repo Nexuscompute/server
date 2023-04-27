@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2010, Oracle and/or its affiliates.
-   Copyright (c) 2008-2011 Monty Program Ab
+   Copyright (c) 2008, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -58,13 +58,14 @@ public:
     @param item_list The list of arguments to the function, can be NULL
     @return An item representing the parsed function call, or NULL
   */
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name, List<Item> *item_list) = 0;
+  virtual Item *create_func(THD *thd, const LEX_CSTRING *name,
+                            List<Item> *item_list) = 0;
 
 protected:
   /** Constructor */
-  Create_func() {}
+  Create_func() = default;
   /** Destructor */
-  virtual ~Create_func() {}
+  virtual ~Create_func() = default;
 };
 
 
@@ -75,8 +76,8 @@ protected:
 class Create_func_arg0 : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name,
-                            List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     Builder method, with no arguments.
@@ -87,9 +88,9 @@ public:
 
 protected:
   /** Constructor. */
-  Create_func_arg0() {}
+  Create_func_arg0() = default;
   /** Destructor. */
-  virtual ~Create_func_arg0() {}
+  virtual ~Create_func_arg0() = default;
 };
 
 
@@ -100,7 +101,8 @@ protected:
 class Create_func_arg1 : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name, List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     Builder method, with one argument.
@@ -112,9 +114,9 @@ public:
 
 protected:
   /** Constructor. */
-  Create_func_arg1() {}
+  Create_func_arg1() = default;
   /** Destructor. */
-  virtual ~Create_func_arg1() {}
+  virtual ~Create_func_arg1() = default;
 };
 
 
@@ -125,7 +127,8 @@ protected:
 class Create_func_arg2 : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name, List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     Builder method, with two arguments.
@@ -138,9 +141,9 @@ public:
 
 protected:
   /** Constructor. */
-  Create_func_arg2() {}
+  Create_func_arg2() = default;
   /** Destructor. */
-  virtual ~Create_func_arg2() {}
+  virtual ~Create_func_arg2() = default;
 };
 
 
@@ -151,7 +154,8 @@ protected:
 class Create_func_arg3 : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name, List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     Builder method, with three arguments.
@@ -165,9 +169,9 @@ public:
 
 protected:
   /** Constructor. */
-  Create_func_arg3() {}
+  Create_func_arg3() = default;
   /** Destructor. */
-  virtual ~Create_func_arg3() {}
+  virtual ~Create_func_arg3() = default;
 };
 
 
@@ -184,8 +188,8 @@ protected:
 class Create_native_func : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name,
-                            List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     Builder method, with no arguments.
@@ -194,14 +198,14 @@ public:
     @param item_list The function parameters, none of which are named
     @return An item representing the function call
   */
-  virtual Item *create_native(THD *thd, LEX_CSTRING *name,
+  virtual Item *create_native(THD *thd, const LEX_CSTRING *name,
                               List<Item> *item_list) = 0;
 
 protected:
   /** Constructor. */
-  Create_native_func() {}
+  Create_native_func() = default;
   /** Destructor. */
-  virtual ~Create_native_func() {}
+  virtual ~Create_native_func() = default;
 };
 
 
@@ -222,8 +226,8 @@ public:
     @param item_list The list of arguments to the function, can be NULL
     @return An item representing the parsed function call
   */
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name,
-                            List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     The builder create method, for qualified functions.
@@ -234,15 +238,17 @@ public:
     @param item_list The list of arguments to the function, can be NULL
     @return An item representing the parsed function call
   */
-  virtual Item *create_with_db(THD *thd, LEX_CSTRING *db, LEX_CSTRING *name,
+  virtual Item *create_with_db(THD *thd,
+                               const LEX_CSTRING *db,
+                               const LEX_CSTRING *name,
                                bool use_explicit_name,
                                List<Item> *item_list) = 0;
 
 protected:
   /** Constructor. */
-  Create_qfunc() {}
+  Create_qfunc() = default;
   /** Destructor. */
-  virtual ~Create_qfunc() {}
+  virtual ~Create_qfunc() = default;
 };
 
 
@@ -272,8 +278,8 @@ extern Create_qfunc * find_qualified_function_builder(THD *thd);
 class Create_udf_func : public Create_func
 {
 public:
-  virtual Item *create_func(THD *thd, LEX_CSTRING *name,
-                            List<Item> *item_list);
+  Item *create_func(THD *thd, const LEX_CSTRING *name, List<Item> *item_list)
+    override;
 
   /**
     The builder create method, for User Defined Functions.
@@ -289,9 +295,9 @@ public:
 
 protected:
   /** Constructor. */
-  Create_udf_func() {}
+  Create_udf_func() = default;
   /** Destructor. */
-  virtual ~Create_udf_func() {}
+  virtual ~Create_udf_func() = default;
 };
 #endif
 

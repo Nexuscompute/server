@@ -1,5 +1,5 @@
 /*
-      Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+      Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
       This program is free software; you can redistribute it and/or modify
       it under the terms of the GNU General Public License, version 2.0,
@@ -40,6 +40,11 @@
 
 THR_LOCK table_replication_applier_status_by_worker::m_table_lock;
 
+PFS_engine_table_share_state
+table_replication_applier_status_by_worker::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_replication_applier_status_by_worker::m_share=
 {
@@ -61,7 +66,9 @@ table_replication_applier_status_by_worker::m_share=
   "LAST_ERROR_TIMESTAMP TIMESTAMP(0) not null comment 'Time stamp of last error.',"
   "WORKER_IDLE_TIME BIGINT UNSIGNED not null comment 'Total idle time in seconds that the worker thread has spent waiting for work from SQL thread.',"
   "LAST_TRANS_RETRY_COUNT INTEGER not null comment 'Total number of retries attempted by last transaction.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_replication_applier_status_by_worker::create(void)
@@ -93,72 +100,67 @@ ha_rows table_replication_applier_status_by_worker::get_row_count()
 int table_replication_applier_status_by_worker::rnd_next(void)
 {
   rpl_parallel_thread_pool *pool= &global_rpl_thread_pool;
-  if (pool->inited && pool->count)
+  struct pool_bkp_for_pfs *bkp_pool= &pool->pfs_bkp;
+  mysql_mutex_lock(&pool->LOCK_rpl_thread_pool);
+  if (bkp_pool->inited && bkp_pool->count && bkp_pool->is_valid)
   {
-    mysql_mutex_lock(&pool->LOCK_rpl_thread_pool);
-    uint worker_count= pool->count;
     for (m_pos.set_at(&m_next_pos);
-        m_pos.has_more_workers(worker_count);
+        m_pos.has_more_workers(bkp_pool->count);
         m_pos.next_worker())
     {
-      rpl_parallel_thread *rpt= pool->threads[m_pos.m_index];
+      rpl_parallel_thread *rpt= bkp_pool->rpl_thread_arr[m_pos.m_index];
       make_row(rpt);
       m_next_pos.set_after(&m_pos);
       mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
       return 0;
     }
-    mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
   }
   else
   {
-    mysql_mutex_lock(&pool->LOCK_rpl_thread_pool);
-    struct pool_bkp_for_pfs *bkp_pool= &pool->pfs_bkp;
-    if (bkp_pool->inited && bkp_pool->count)
+    if (pool->inited && pool->count)
     {
+      uint worker_count= pool->count;
       for (m_pos.set_at(&m_next_pos);
-           m_pos.has_more_workers(bkp_pool->count);
-           m_pos.next_worker())
+          m_pos.has_more_workers(worker_count);
+          m_pos.next_worker())
       {
-        rpl_parallel_thread *rpt= bkp_pool->rpl_thread_arr[m_pos.m_index];
+        rpl_parallel_thread *rpt= pool->threads[m_pos.m_index];
         make_row(rpt);
         m_next_pos.set_after(&m_pos);
         mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
         return 0;
       }
     }
-    mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
   }
+  mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
   return HA_ERR_END_OF_FILE;
 }
 
 int table_replication_applier_status_by_worker::rnd_pos(const void *pos)
 {
   int res= HA_ERR_RECORD_DELETED;
+  rpl_parallel_thread_pool *pool= &global_rpl_thread_pool;
+  struct pool_bkp_for_pfs *bkp_pool= &pool->pfs_bkp;
 
   set_position(pos);
-
-  if (global_rpl_thread_pool.inited && global_rpl_thread_pool.count)
+  mysql_mutex_lock(&pool->LOCK_rpl_thread_pool);
+  if (bkp_pool->inited && bkp_pool->count && bkp_pool->is_valid
+      && m_pos.m_index < bkp_pool->count)
   {
-    rpl_parallel_thread_pool *pool= &global_rpl_thread_pool;
-    mysql_mutex_lock(&pool->LOCK_rpl_thread_pool);
-    if(m_pos.m_index < pool->count)
-    {
-      rpl_parallel_thread *rpt= pool->threads[m_pos.m_index];
-      make_row(rpt);
-      mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
-      res= 0;
-    }
+    rpl_parallel_thread *rpt= bkp_pool->rpl_thread_arr[m_pos.m_index];
+    make_row(rpt);
+    res= 0;
   }
   else
   {
-    struct pool_bkp_for_pfs *bkp_pool= &global_rpl_thread_pool.pfs_bkp;
-    if (bkp_pool->inited && bkp_pool->count && m_pos.m_index < bkp_pool->count)
+    if (pool->inited && pool->count && m_pos.m_index < pool->count)
     {
-      rpl_parallel_thread *rpt= bkp_pool->rpl_thread_arr[m_pos.m_index];
+      rpl_parallel_thread *rpt= pool->threads[m_pos.m_index];
       make_row(rpt);
       res= 0;
     }
   }
+  mysql_mutex_unlock(&pool->LOCK_rpl_thread_pool);
   return res;
 }
 
@@ -239,7 +241,7 @@ int table_replication_applier_status_by_worker
   if (unlikely(! m_row_exists))
     return HA_ERR_RECORD_DELETED;
 
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -279,7 +281,7 @@ int table_replication_applier_status_by_worker
         set_field_ulong(f, m_row.last_trans_retry_count);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

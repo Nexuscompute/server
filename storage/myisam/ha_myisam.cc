@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2017, MariaDB Corporation.
+   Copyright (c) 2009, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -33,6 +33,7 @@
 #include "sql_table.h"                          // tablename_to_filename
 #include "sql_class.h"                          // THD
 #include "debug_sync.h"
+#include "sql_debug.h"
 
 ulonglong myisam_recover_options;
 static ulong opt_myisam_block_size;
@@ -121,6 +122,28 @@ static void debug_wait_for_kill(const char *info)
   thd_proc_info(thd, prev_info);
   DBUG_VOID_RETURN;
 }
+
+
+class Debug_key_myisam: public Debug_key
+{
+public:
+  Debug_key_myisam() { }
+
+  static void print_keys_myisam(THD *thd, const char *where,
+                                const TABLE *table,
+                                const MI_KEYDEF *keydef, uint count)
+  {
+    for (uint i= 0; i < count; i++)
+    {
+      Debug_key_myisam tmp;
+      if (!tmp.append(where, strlen(where)) &&
+          !tmp.append_key(table->s->key_info[i].name, keydef[i].flag))
+        tmp.print(thd);
+      print_keysegs(thd, keydef[i].seg, keydef[i].keysegs);
+    }
+  }
+};
+
 #endif
 
 /*****************************************************************************
@@ -554,7 +577,8 @@ int check_definition(MI_KEYDEF *t1_keyinfo, MI_COLUMNDEF *t1_recinfo,
           t1_keysegs_j__type != t2_keysegs[j].type ||
           t1_keysegs[j].null_bit != t2_keysegs[j].null_bit ||
           t1_keysegs[j].length != t2_keysegs[j].length ||
-          t1_keysegs[j].start != t2_keysegs[j].start)
+          t1_keysegs[j].start != t2_keysegs[j].start ||
+          (t1_keysegs[j].flag ^ t2_keysegs[j].flag) & HA_REVERSE_SORT)
       {
         DBUG_PRINT("error", ("Key segment %d (key %d) has different "
                              "definition", j, i));
@@ -707,7 +731,7 @@ static int compute_vcols(MI_INFO *info, uchar *record, int keynum)
   {
     Field *f= table->field[kp->fieldnr - 1];
     if (f->vcol_info && !f->vcol_info->stored_in_db)
-      table->update_virtual_field(f);
+      table->update_virtual_field(f, false);
   }
   mysql_mutex_unlock(&info->s->intern_lock);
   return 0;
@@ -837,6 +861,13 @@ int ha_myisam::open(const char *name, int mode, uint test_if_locked)
       /* purecov: end */
     }
   }
+
+  DBUG_EXECUTE_IF("key",
+    Debug_key_myisam::print_keys_myisam(table->in_use,
+                                        "ha_myisam::open: ",
+                                        table, file->s->keyinfo,
+                                        file->s->base.keys);
+  );
   
   if (test_if_locked & (HA_OPEN_IGNORE_IF_LOCKED | HA_OPEN_TMP_TABLE))
     (void) mi_extra(file, HA_EXTRA_NO_WAIT_LOCK, 0);
@@ -2113,9 +2144,17 @@ int ha_myisam::info(uint flag)
     share->keys_for_keyread.intersect(share->keys_in_use);
     share->db_record_offset= misam_info.record_offset;
     if (share->key_parts)
-      memcpy((char*) table->key_info[0].rec_per_key,
-	     (char*) misam_info.rec_per_key,
-             sizeof(table->key_info[0].rec_per_key[0])*share->key_parts);
+    {
+      ulong *from= misam_info.rec_per_key;
+      KEY *key, *key_end;
+      for (key= table->key_info, key_end= key + share->keys;
+           key < key_end ; key++)
+      {
+        memcpy(key->rec_per_key, from,
+               key->user_defined_key_parts * sizeof(*from));
+        from+= key->user_defined_key_parts;
+      }
+    }
     if (table_share->tmp_table == NO_TMP_TABLE)
       mysql_mutex_unlock(&table_share->LOCK_share);
   }
@@ -2234,6 +2273,15 @@ int ha_myisam::create(const char *name, TABLE *table_arg,
 
   if ((error= table2myisam(table_arg, &keydef, &recinfo, &record_count)))
     DBUG_RETURN(error); /* purecov: inspected */
+
+#ifndef DBUG_OFF
+  DBUG_EXECUTE_IF("key",
+    Debug_key_myisam::print_keys_myisam(table_arg->in_use,
+                                        "ha_myisam::create: ",
+                                        table_arg, keydef, share->keys);
+  );
+#endif
+
   bzero((char*) &create_info, sizeof(create_info));
   create_info.max_rows= share->max_rows;
   create_info.reloc_rows= share->min_rows;
@@ -2304,6 +2352,7 @@ void ha_myisam::get_auto_increment(ulonglong offset, ulonglong increment,
   ulonglong nr;
   int error;
   uchar key[HA_MAX_KEY_LENGTH];
+  enum ha_rkey_function search_flag= HA_READ_PREFIX_LAST;
 
   if (!table->s->next_number_key_offset)
   {						// Autoincrement at key-start
@@ -2317,13 +2366,18 @@ void ha_myisam::get_auto_increment(ulonglong offset, ulonglong increment,
   /* it's safe to call the following if bulk_insert isn't on */
   mi_flush_bulk_insert(file, table->s->next_number_index);
 
+  if (unlikely(table->key_info[table->s->next_number_index].
+                  key_part[table->s->next_number_keypart].key_part_flag &
+                    HA_REVERSE_SORT))
+    search_flag= HA_READ_KEY_EXACT;
+
   (void) extra(HA_EXTRA_KEYREAD);
   key_copy(key, table->record[0],
            table->key_info + table->s->next_number_index,
            table->s->next_number_key_offset);
   error= mi_rkey(file, table->record[1], (int) table->s->next_number_index,
                  key, make_prev_keypart_map(table->s->next_number_keypart),
-                 HA_READ_PREFIX_LAST);
+                 search_flag);
   if (error)
     nr= 1;
   else

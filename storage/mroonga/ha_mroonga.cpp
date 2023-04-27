@@ -335,7 +335,7 @@ static int mrn_change_encoding(grn_ctx *ctx, const CHARSET_INFO *charset)
   return mrn::encoding::set(ctx, charset);
 }
 
-#if !defined(DBUG_OFF) && !defined(_lint)
+#if defined DBUG_TRACE && !defined(_lint)
 static const char *mrn_inspect_thr_lock_type(enum thr_lock_type lock_type)
 {
   const char *inspected = "<unknown>";
@@ -3381,16 +3381,16 @@ int ha_mroonga::wrapper_create_index(const char *name, TABLE *table,
                                          index_tables, NULL, tmp_share);
       }
     }
-  }
 
-  if (error) {
-    for (uint j = 0; j < i; j++) {
-      if (index_tables[j]) {
-        grn_obj_remove(ctx, index_tables[j]);
+    if (error) {
+      for (uint j = 0; j < i; j++) {
+        if (index_tables[j]) {
+          grn_obj_remove(ctx, index_tables[j]);
+        }
       }
+      grn_obj_remove(ctx, grn_table);
+      grn_table = NULL;
     }
-    grn_obj_remove(ctx, grn_table);
-    grn_table = NULL;
   }
   MRN_FREE_VARIABLE_LENGTH_ARRAYS(index_tables);
   DBUG_RETURN(error);
@@ -3844,6 +3844,14 @@ int ha_mroonga::storage_create_validate_index(TABLE *table)
     KEY *key_info = &(table->s->key_info[i]);
     // must be single column key
     int key_parts = KEY_N_KEY_PARTS(key_info);
+    for (int j = 0; j < key_parts; j++) {
+      if (key_info->key_part[j].key_part_flag & HA_REVERSE_SORT) {
+        GRN_LOG(ctx, GRN_LOG_ERROR, "DESC indexes are not supported");
+        error = ER_CANT_CREATE_TABLE;
+        my_message(error, "DESC indexes are not supported", MYF(0));
+        DBUG_RETURN(error);
+      }
+    }
     if (key_parts != 1) {
       continue;
     }

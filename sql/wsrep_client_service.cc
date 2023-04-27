@@ -1,4 +1,4 @@
-/* Copyright 2018-2021 Codership Oy <info@codership.com>
+/* Copyright 2018-2023 Codership Oy <info@codership.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,6 +20,8 @@
 #include "wsrep_thd.h"
 #include "wsrep_xid.h"
 #include "wsrep_trans_observer.h"
+#include "wsrep_server_state.h"
+#include "wsrep_mysqld.h"
 
 #include "sql_base.h"    /* close_temporary_table() */
 #include "sql_class.h"   /* THD */
@@ -83,18 +85,37 @@ int Wsrep_client_service::prepare_data_for_replication()
   DBUG_ASSERT(m_thd == current_thd);
   DBUG_ENTER("Wsrep_client_service::prepare_data_for_replication");
   size_t data_len= 0;
-  IO_CACHE* cache= wsrep_get_trans_cache(m_thd);
+  IO_CACHE* transactional_cache= wsrep_get_cache(m_thd, true);
+  IO_CACHE* stmt_cache= wsrep_get_cache(m_thd, false);
 
-  if (cache)
+  if (transactional_cache || stmt_cache)
   {
     m_thd->binlog_flush_pending_rows_event(true);
-    if (wsrep_write_cache(m_thd, cache, &data_len))
+
+    size_t transactional_data_len= 0;
+    size_t stmt_data_len= 0;
+
+    // Write transactional cache
+    if (transactional_cache &&
+        wsrep_write_cache(m_thd, transactional_cache, &transactional_data_len))
     {
       WSREP_ERROR("rbr write fail, data_len: %zu",
                   data_len);
       // wsrep_override_error(m_thd, ER_ERROR_DURING_COMMIT);
       DBUG_RETURN(1);
     }
+
+    // Write stmt cache
+    if (stmt_cache && wsrep_write_cache(m_thd, stmt_cache, &stmt_data_len))
+    {
+      WSREP_ERROR("rbr write fail, data_len: %zu",
+                  data_len);
+      // wsrep_override_error(m_thd, ER_ERROR_DURING_COMMIT);
+      DBUG_RETURN(1);
+    }
+
+    // Complete data written from both caches
+    data_len = transactional_data_len + stmt_data_len;
   }
 
   if (data_len == 0)
@@ -136,7 +157,7 @@ int Wsrep_client_service::prepare_fragment_for_replication(
   DBUG_ASSERT(m_thd == current_thd);
   THD* thd= m_thd;
   DBUG_ENTER("Wsrep_client_service::prepare_fragment_for_replication");
-  IO_CACHE* cache= wsrep_get_trans_cache(thd);
+  IO_CACHE* cache= wsrep_get_cache(thd, true);
   thd->binlog_flush_pending_rows_event(true);
 
   if (!cache)
@@ -218,7 +239,7 @@ bool Wsrep_client_service::statement_allowed_for_streaming() const
 
 size_t Wsrep_client_service::bytes_generated() const
 {
-  IO_CACHE* cache= wsrep_get_trans_cache(m_thd);
+  IO_CACHE* cache= wsrep_get_cache(m_thd, true);
   if (cache)
   {
     size_t pending_rows_event_length= 0;
@@ -326,21 +347,34 @@ void Wsrep_client_service::debug_crash(const char* crash_point)
 int Wsrep_client_service::bf_rollback()
 {
   DBUG_ASSERT(m_thd == current_thd);
-  DBUG_ENTER("Wsrep_client_service::rollback");
+  DBUG_ENTER("Wsrep_client_service::bf_rollback");
 
   int ret= (trans_rollback_stmt(m_thd) || trans_rollback(m_thd));
-  if (m_thd->locked_tables_mode && m_thd->lock)
+
+  WSREP_DEBUG("::bf_rollback() thread: %lu, client_state %s "
+              "client_mode %s trans_state %s killed %d",
+              thd_get_thread_id(m_thd),
+              wsrep_thd_client_state_str(m_thd),
+              wsrep_thd_client_mode_str(m_thd),
+              wsrep_thd_transaction_state_str(m_thd),
+              m_thd->killed);
+
+  /* If client is quiting all below will be done in THD::cleanup()
+     TODO: why we need this any other case?  */
+  if (m_thd->wsrep_cs().state() != wsrep::client_state::s_quitting)
   {
-    if (m_thd->locked_tables_list.unlock_locked_tables(m_thd))
-      ret= 1;
-    m_thd->variables.option_bits&= ~OPTION_TABLE_LOCK;
+    if (m_thd->locked_tables_mode && m_thd->lock)
+    {
+      if (m_thd->locked_tables_list.unlock_locked_tables(m_thd))
+        ret= 1;
+      m_thd->variables.option_bits&= ~OPTION_TABLE_LOCK;
+    }
+    if (m_thd->global_read_lock.is_acquired())
+    {
+      m_thd->global_read_lock.unlock_global_read_lock(m_thd);
+    }
+    m_thd->release_transactional_locks();
   }
-  if (m_thd->global_read_lock.is_acquired())
-  {
-    m_thd->global_read_lock.unlock_global_read_lock(m_thd);
-  }
-  m_thd->release_transactional_locks();
-  m_thd->mdl_context.release_explicit_locks();
 
   DBUG_RETURN(ret);
 }

@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2001, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2017, MariaDB
+   Copyright (c) 2010, 2012, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -974,7 +974,7 @@ static int handle_request_for_tables(char *tables, size_t length,
   case DO_ANALYZE:
     if (view)
     {
-      printf("%-50s %s\n", tables, "Can't run anaylyze on a view");
+      printf("%-50s %s\n", tables, "Can't run analyze on a view");
       DBUG_RETURN(1);
     }
     DBUG_ASSERT(!view);
@@ -1002,6 +1002,7 @@ static int handle_request_for_tables(char *tables, size_t length,
     DBUG_RETURN(1);
   if (dont_quote)
   {
+    DBUG_ASSERT(op);
     DBUG_ASSERT(strlen(op)+strlen(tables)+strlen(options)+8+1 <= query_size);
 
     /* No backticks here as we added them before */
@@ -1061,7 +1062,6 @@ static void print_result()
   char prev[(NAME_LEN+9)*3+2];
   char prev_alter[MAX_ALTER_STR_SIZE];
   size_t length_of_db= strlen(sock->db);
-  uint i;
   my_bool found_error=0, table_rebuild=0;
   DYNAMIC_ARRAY *array4repair= &tables4repair;
   DBUG_ENTER("print_result");
@@ -1070,7 +1070,7 @@ static void print_result()
 
   prev[0] = '\0';
   prev_alter[0]= 0;
-  for (i = 0; (row = mysql_fetch_row(res)); i++)
+  while ((row = mysql_fetch_row(res)))
   {
     int changed = strcmp(prev, row[0]);
     my_bool status = !strcmp(row[2], "status");
@@ -1166,7 +1166,10 @@ static int dbConnect(char *host, char *user, char *passwd)
 		  opt_ssl_capath, opt_ssl_cipher);
     mysql_options(&mysql_connection, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
     mysql_options(&mysql_connection, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
+    mysql_options(&mysql_connection, MARIADB_OPT_TLS_VERSION, opt_tls_version);
   }
+  mysql_options(&mysql_connection, MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
+                (char*)&opt_ssl_verify_server_cert);
 #endif
   if (opt_protocol)
     mysql_options(&mysql_connection,MYSQL_OPT_PROTOCOL,(char*)&opt_protocol);

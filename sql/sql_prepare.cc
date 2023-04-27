@@ -1,5 +1,5 @@
 /* Copyright (c) 2002, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2021, MariaDB
+   Copyright (c) 2008, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -201,8 +201,8 @@ public:
   Prepared_statement(THD *thd_arg);
   virtual ~Prepared_statement();
   void setup_set_params();
-  virtual Query_arena::Type type() const;
-  virtual void cleanup_stmt(bool restore_set_statement_vars);
+  Query_arena::Type type() const override;
+  bool cleanup_stmt(bool restore_set_statement_vars) override;
   bool set_name(const LEX_CSTRING *name);
   inline void close_cursor() { delete cursor; cursor= 0; }
   inline bool is_in_use() { return flags & (uint) IS_IN_USE; }
@@ -1288,7 +1288,8 @@ static bool mysql_test_insert_common(Prepared_statement *stmt,
                                      List<List_item> &values_list,
                                      List<Item> &update_fields,
                                      List<Item> &update_values,
-                                     enum_duplicates duplic)
+                                     enum_duplicates duplic,
+                                     bool ignore)
 {
   THD *thd= stmt->thd;
   List_iterator_fast<List_item> its(values_list);
@@ -1324,7 +1325,8 @@ static bool mysql_test_insert_common(Prepared_statement *stmt,
     }
 
     if (mysql_prepare_insert(thd, table_list, fields, values, update_fields,
-                             update_values, duplic, &unused_conds, FALSE))
+                             update_values, duplic, ignore,
+                             &unused_conds, FALSE))
       goto error;
 
     value_count= values->elements;
@@ -1379,7 +1381,7 @@ static bool mysql_test_insert(Prepared_statement *stmt,
                               List<List_item> &values_list,
                               List<Item> &update_fields,
                               List<Item> &update_values,
-                              enum_duplicates duplic)
+                              enum_duplicates duplic, bool ignore)
 {
   THD *thd= stmt->thd;
 
@@ -1395,7 +1397,7 @@ static bool mysql_test_insert(Prepared_statement *stmt,
   }
 
   return mysql_test_insert_common(stmt, table_list, fields, values_list,
-                                  update_fields, update_values, duplic);
+                                  update_fields, update_values, duplic, ignore);
 }
 
 
@@ -1443,7 +1445,7 @@ static int mysql_test_update(Prepared_statement *stmt,
     DBUG_ASSERT(update_source_table || table_list->view != 0);
     DBUG_PRINT("info", ("Switch to multi-update"));
     /* pass counter value */
-    thd->lex->table_count= table_count;
+    thd->lex->table_count_update= table_count;
     /* convert to multiupdate */
     DBUG_RETURN(2);
   }
@@ -2463,20 +2465,24 @@ static bool check_prepared_statement(Prepared_statement *stmt)
       goto error;
   }
 
+#ifdef WITH_WSREP
+    if (wsrep_sync_wait(thd, sql_command))
+      goto error;
+#endif
   switch (sql_command) {
   case SQLCOM_REPLACE:
   case SQLCOM_INSERT:
     res= mysql_test_insert(stmt, tables, lex->field_list,
                            lex->many_values,
                            lex->update_list, lex->value_list,
-                           lex->duplicates);
+                           lex->duplicates, lex->ignore);
     break;
 
   case SQLCOM_LOAD:
     res= mysql_test_insert_common(stmt, tables, lex->field_list,
                                   lex->many_values,
                                   lex->update_list, lex->value_list,
-                                  lex->duplicates);
+                                  lex->duplicates, lex->ignore);
     break;
 
   case SQLCOM_UPDATE:
@@ -3139,7 +3145,6 @@ void reinit_stmt_before_use(THD *thd, LEX *lex)
   }
   for (; sl; sl= sl->next_select_in_list())
   {
-    sl->parent_lex->in_sum_func= NULL;
     if (sl->changed_elements & TOUCHED_SEL_COND)
     {
       /* remove option which was put by mysql_explain_union() */
@@ -3274,6 +3279,7 @@ void reinit_stmt_before_use(THD *thd, LEX *lex)
     lex->result->set_thd(thd);
   }
   lex->allow_sum_func.clear_all();
+  lex->in_sum_func= NULL;
   DBUG_VOID_RETURN;
 }
 
@@ -4029,9 +4035,7 @@ Reprepare_observer::report_error(THD *thd)
 * Server_runnable
 *******************************************************************/
 
-Server_runnable::~Server_runnable()
-{
-}
+Server_runnable::~Server_runnable() = default;
 
 ///////////////////////////////////////////////////////////////////////////
 
@@ -4217,19 +4221,20 @@ Query_arena::Type Prepared_statement::type() const
 }
 
 
-void Prepared_statement::cleanup_stmt(bool restore_set_statement_vars)
+bool Prepared_statement::cleanup_stmt(bool restore_set_statement_vars)
 {
+  bool error= false;
   DBUG_ENTER("Prepared_statement::cleanup_stmt");
   DBUG_PRINT("enter",("stmt: %p", this));
 
   if (restore_set_statement_vars)
-    lex->restore_set_statement_var();
+    error= lex->restore_set_statement_var();
 
   thd->rollback_item_tree_changes();
   cleanup_items(free_list);
   thd->cleanup_after_query();
 
-  DBUG_VOID_RETURN;
+  DBUG_RETURN(error);
 }
 
 
@@ -4465,7 +4470,7 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
     Pass the value true to restore original values of variables modified
     on handling SET STATEMENT clause.
   */
-  cleanup_stmt(true);
+  error|= cleanup_stmt(true);
 
   thd->restore_backup_statement(this, &stmt_backup);
   thd->stmt_arena= old_stmt_arena;
@@ -4498,6 +4503,8 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
     if (thd->spcont == NULL)
       general_log_write(thd, COM_STMT_PREPARE, query(), query_length());
   }
+  // The same format as for triggers to compare
+  hr_prepare_time= my_hrtime();
   DBUG_RETURN(error);
 }
 
@@ -4591,8 +4598,8 @@ Prepared_statement::execute_loop(String *expanded_query,
                                  uchar *packet_end)
 {
   Reprepare_observer reprepare_observer;
-  bool error;
   int reprepare_attempt= 0;
+  bool error;
   iterations= FALSE;
 
   /*
@@ -4611,7 +4618,13 @@ Prepared_statement::execute_loop(String *expanded_query,
 
   if (set_parameters(expanded_query, packet, packet_end))
     return TRUE;
-
+#ifdef WITH_WSREP
+  if (thd->wsrep_delayed_BF_abort)
+  {
+    WSREP_DEBUG("delayed BF abort, quitting execute_loop, stmt: %d", id);
+    return TRUE;
+  }
+#endif /* WITH_WSREP */
 reexecute:
   // Make sure that reprepare() did not create any new Items.
   DBUG_ASSERT(thd->free_list == NULL);
@@ -5274,7 +5287,8 @@ bool Prepared_statement::execute(String *expanded_query, bool open_cursor)
   */
   log_slow_statement(thd);
 
-  lex->restore_set_statement_var();
+  error|= lex->restore_set_statement_var();
+
 
   /*
     EXECUTE command has its own dummy "explain data". We don't need it,
@@ -5318,7 +5332,7 @@ bool Prepared_statement::execute(String *expanded_query, bool open_cursor)
   }
 
 error:
-  thd->lex->restore_set_statement_var();
+  error|= thd->lex->restore_set_statement_var();
   flags&= ~ (uint) IS_IN_USE;
   return error;
 }
@@ -5614,13 +5628,28 @@ public:
   MEM_ROOT *alloc;
   THD *new_thd;
   Security_context empty_ctx;
+  ulonglong client_capabilities;
+
+  my_bool do_log_bin;
 
   Protocol_local(THD *thd_arg, THD *new_thd_arg, ulong prealloc) :
     Protocol_text(thd_arg, prealloc),
     cur_data(0), first_data(0), data_tail(&first_data), alloc(0),
-    new_thd(new_thd_arg)
+    new_thd(new_thd_arg), do_log_bin(FALSE)
   {}
  
+  void set_binlog_vars(my_bool *sav_log_bin)
+  {
+    *sav_log_bin= thd->variables.sql_log_bin;
+    thd->variables.sql_log_bin= do_log_bin;
+    thd->set_binlog_bit();
+  }
+  void restore_binlog_vars(my_bool sav_log_bin)
+  {
+    do_log_bin= thd->variables.sql_log_bin;
+    thd->variables.sql_log_bin= sav_log_bin;
+    thd->set_binlog_bit();
+  }
 protected:
   bool net_store_data(const uchar *from, size_t length);
   bool net_store_data_cs(const uchar *from, size_t length,
@@ -6227,13 +6256,20 @@ loc_advanced_command(MYSQL *mysql, enum enum_server_command command,
   {
     Ed_connection con(p->thd);
     Security_context *ctx_orig= p->thd->security_ctx;
+    ulonglong cap_orig= p->thd->client_capabilities;
     MYSQL_LEX_STRING sql_text;
+    my_bool log_bin_orig;
+    p->set_binlog_vars(&log_bin_orig);
+
     DBUG_ASSERT(current_thd == p->thd);
     sql_text.str= (char *) arg;
     sql_text.length= arg_length;
     p->thd->security_ctx= &p->empty_ctx;
+    p->thd->client_capabilities= p->client_capabilities;
     result= con.execute_direct(p, sql_text);
+    p->thd->client_capabilities= cap_orig;
     p->thd->security_ctx= ctx_orig;
+    p->restore_binlog_vars(log_bin_orig);
   }
   if (skip_check)
     result= 0;
@@ -6357,6 +6393,7 @@ extern "C" MYSQL *mysql_real_connect_local(MYSQL *mysql)
   THD *thd_orig= current_thd;
   THD *new_thd;
   Protocol_local *p;
+  ulonglong client_flag;
   DBUG_ENTER("mysql_real_connect_local");
 
   /* Test whether we're already connected */
@@ -6368,6 +6405,9 @@ extern "C" MYSQL *mysql_real_connect_local(MYSQL *mysql)
 
   mysql->methods= &local_methods;
   mysql->user= NULL;
+  client_flag= mysql->options.client_flag;
+  client_flag|= CLIENT_MULTI_RESULTS;;
+  client_flag&= ~(CLIENT_COMPRESS | CLIENT_PLUGIN_AUTH);
 
   mysql->info_buffer= (char *) my_malloc(PSI_INSTRUMENT_ME,
                                          MYSQL_ERRMSG_SIZE, MYF(0));
@@ -6389,6 +6429,10 @@ extern "C" MYSQL *mysql_real_connect_local(MYSQL *mysql)
     new_thd->security_ctx->skip_grants();
     new_thd->query_cache_is_applicable= 0;
     new_thd->variables.wsrep_on= 0;
+    new_thd->variables.sql_log_bin= 0;
+    new_thd->set_binlog_bit();
+    new_thd->client_capabilities= client_flag;
+
     /*
       TOSO: decide if we should turn the auditing off
       for such threads.
@@ -6409,6 +6453,7 @@ extern "C" MYSQL *mysql_real_connect_local(MYSQL *mysql)
   {
     p->empty_ctx.init();
     p->empty_ctx.skip_grants();
+    p->client_capabilities= client_flag;
   }
 
   mysql->thd= p;

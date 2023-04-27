@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2014, 2021, MariaDB Corporation.
+Copyright (c) 2014, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -30,10 +30,8 @@ Created 11/5/1995 Heikki Tuuri
 #include "log0log.h"
 #include "buf0buf.h"
 
-/** Number of pages flushed. Protected by buf_pool.mutex. */
-extern ulint buf_flush_page_count;
 /** Number of pages flushed via LRU. Protected by buf_pool.mutex.
-Also included in buf_flush_page_count. */
+Also included in buf_pool.stat.n_pages_written. */
 extern ulint buf_lru_flush_page_count;
 /** Number of pages freed without flushing. Protected by buf_pool.mutex. */
 extern ulint buf_lru_freed_page_count;
@@ -86,15 +84,18 @@ buf_flush_init_for_writing(
 bool buf_flush_list_space(fil_space_t *space, ulint *n_flushed= nullptr)
   MY_ATTRIBUTE((warn_unused_result));
 
-/** Write out dirty blocks from buf_pool.LRU.
+/** Write out dirty blocks from buf_pool.LRU,
+and move clean blocks to buf_pool.free.
+The caller must invoke buf_dblwr.flush_buffered_writes()
+after releasing buf_pool.mutex.
 @param max_n    wished maximum mumber of blocks flushed
-@return the number of processed pages
+@param evict    whether to evict pages after flushing
+@return evict ? number of processed pages : number of pages written
 @retval 0 if a buf_pool.LRU batch is already running */
-ulint buf_flush_LRU(ulint max_n);
+ulint buf_flush_LRU(ulint max_n, bool evict);
 
-/** Wait until a flush batch ends.
-@param lru    true=buf_pool.LRU; false=buf_pool.flush_list */
-void buf_flush_wait_batch_end(bool lru);
+/** Wait until a LRU flush batch ends. */
+void buf_flush_wait_LRU_batch_end();
 /** Wait until all persistent pages are flushed up to a limit.
 @param sync_lsn   buf_pool.get_oldest_modification(LSN_MAX) to wait for */
 ATTRIBUTE_COLD void buf_flush_wait_flushed(lsn_t sync_lsn);
@@ -103,38 +104,8 @@ ATTRIBUTE_COLD void buf_flush_wait_flushed(lsn_t sync_lsn);
 @param furious  true=furious flushing, false=limit to innodb_io_capacity */
 ATTRIBUTE_COLD void buf_flush_ahead(lsn_t lsn, bool furious);
 
-/********************************************************************//**
-This function should be called at a mini-transaction commit, if a page was
-modified in it. Puts the block to the list of modified blocks, if it not
-already in it. */
-inline void buf_flush_note_modification(buf_block_t *b, lsn_t start, lsn_t end)
-{
-  ut_ad(!srv_read_only_mode);
-  ut_d(const auto s= b->page.state());
-  ut_ad(s > buf_page_t::FREED);
-  ut_ad(s < buf_page_t::READ_FIX);
-  ut_ad(mach_read_from_8(b->page.frame + FIL_PAGE_LSN) <= end);
-  mach_write_to_8(b->page.frame + FIL_PAGE_LSN, end);
-  if (UNIV_LIKELY_NULL(b->page.zip.data))
-    memcpy_aligned<8>(FIL_PAGE_LSN + b->page.zip.data,
-                      FIL_PAGE_LSN + b->page.frame, 8);
-
-  const lsn_t oldest_modification= b->page.oldest_modification();
-
-  if (oldest_modification > 1)
-    ut_ad(oldest_modification <= start);
-  else if (fsp_is_system_temporary(b->page.id().space()))
-    b->page.set_temp_modified();
-  else
-    buf_pool.insert_into_flush_list(b, start);
-  srv_stats.buf_pool_write_requests.inc();
-}
-
 /** Initialize page_cleaner. */
 ATTRIBUTE_COLD void buf_flush_page_cleaner_init();
-
-/** Wait for pending flushes to complete. */
-void buf_flush_wait_batch_end_acquiring_mutex(bool lru);
 
 /** Flush the buffer pool on shutdown. */
 ATTRIBUTE_COLD void buf_flush_buffer_pool();

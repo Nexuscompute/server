@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2017, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -61,6 +61,11 @@ static row_setup_timers all_setup_timers_data[COUNT_SETUP_TIMERS]=
 
 THR_LOCK table_setup_timers::m_table_lock;
 
+PFS_engine_table_share_state
+table_setup_timers::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_setup_timers::m_share=
 {
@@ -75,7 +80,9 @@ table_setup_timers::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE setup_timers("
                       "NAME VARCHAR(64) not null comment 'Type of instrument the timer is used for.',"
                       "TIMER_NAME ENUM ('CYCLE', 'NANOSECOND', 'MICROSECOND', 'MILLISECOND', 'TICK') not null comment 'Timer applying to the instrument type. Can be modified.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_setup_timers::create(void)
@@ -131,7 +138,7 @@ int table_setup_timers::rnd_next(void)
 int table_setup_timers::rnd_pos(const void *pos)
 {
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < COUNT_SETUP_TIMERS);
+  assert(m_pos.m_index < COUNT_SETUP_TIMERS);
   m_row= &all_setup_timers_data[m_pos.m_index];
   return 0;
 }
@@ -143,10 +150,10 @@ int table_setup_timers::read_row_values(TABLE *table,
 {
   Field *f;
 
-  DBUG_ASSERT(m_row);
+  assert(m_row);
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 0);
+  assert(table->s->null_bytes == 0);
 
   for (; (f= *fields) ; fields++)
   {
@@ -161,7 +168,7 @@ int table_setup_timers::read_row_values(TABLE *table,
         set_field_enum(f, *(m_row->m_timer_name_ptr));
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -177,7 +184,7 @@ int table_setup_timers::update_row_values(TABLE *table,
   Field *f;
   longlong value;
 
-  DBUG_ASSERT(m_row);
+  assert(m_row);
 
   for (; (f= *fields) ; fields++)
   {
@@ -195,7 +202,7 @@ int table_setup_timers::update_row_values(TABLE *table,
           return HA_ERR_WRONG_COMMAND;
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

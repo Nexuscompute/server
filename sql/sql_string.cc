@@ -173,6 +173,17 @@ void Binary_string::qs_append_hex(const char *str, uint32 len)
 }
 
 
+void Binary_string::qs_append_hex_uint32(uint32 num)
+{
+  char *to= Ptr + str_length;
+  APPEND_HEX(to, (uchar) (num >> 24));
+  APPEND_HEX(to, (uchar) (num >> 16));
+  APPEND_HEX(to, (uchar) (num >> 8));
+  APPEND_HEX(to, (uchar) num);
+  str_length+= 8;
+}
+
+
 // Convert a string to its HEX representation
 bool Binary_string::set_hex(const char *str, uint32 len)
 {
@@ -398,7 +409,7 @@ bool String::copy_aligned(const char *str, size_t arg_length, size_t offset,
   DBUG_ASSERT(offset && offset != cs->mbminlen);
 
   size_t aligned_length= arg_length + offset;
-  if (alloc(aligned_length))
+  if (alloc(aligned_length+1))
     return TRUE;
   
   /*
@@ -552,7 +563,7 @@ bool String::append(const char *s,size_t size)
   }
 
   /*
-    For an ASCII compatinble string we can just append.
+    For an ASCII compatible string we can just append.
   */
   return Binary_string::append(s, arg_length);
 }
@@ -666,31 +677,35 @@ bool String::append_with_prefill(const char *s,uint32 arg_length,
 }
 
 
-int Binary_string::strstr(const Binary_string &s, uint32 offset)
+int Binary_string::strstr(const char *search, uint32 search_length, uint32 offset)
 {
-  if (s.length()+offset <= str_length)
+  if (search_length + offset <= str_length)
   {
-    if (!s.length())
+    if (!search_length)
       return ((int) offset);	// Empty string is always found
 
-    const char *str = Ptr+offset;
-    const char *search=s.ptr();
-    const char *end=Ptr+str_length-s.length()+1;
-    const char *search_end=s.ptr()+s.length();
+    const char *str= Ptr + offset;
+    const char *end= Ptr + str_length - search_length + 1;
+    const char *search_end= search + search_length;
 skip:
     while (str != end)
     {
       if (*str++ == *search)
       {
-	char *i,*j;
-	i=(char*) str; j=(char*) search+1;
-	while (j != search_end)
-	  if (*i++ != *j++) goto skip;
-	return (int) (str-Ptr) -1;
+        char *i= (char*) str;
+        char *j= (char*) search + 1 ;
+        while (j != search_end)
+          if (*i++ != *j++) goto skip;
+        return (int) (str-Ptr) -1;
       }
     }
   }
   return -1;
+}
+
+int Binary_string::strstr(const Binary_string &s, uint32 offset)
+{
+  return strstr(s.ptr(), s.length(), offset);
 }
 
 /*

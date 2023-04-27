@@ -45,6 +45,10 @@ SET tx_read_only=1;
 BEGIN;
 INSERT INTO t2 VALUES(0);
 INSERT INTO t VALUES(0);
+ROLLBACK;
+BEGIN;
+INSERT INTO t2 VALUES(0);
+INSERT INTO t VALUES(0);
 COMMIT;
 INSERT INTO t VALUES(0);
 DROP TEMPORARY TABLE t,t2;
@@ -183,6 +187,72 @@ INSERT INTO t VALUES (0);
 INSERT INTO t VALUES (1),(0),(1);
 DROP TABLE t;
 #
+# MDEV-28327 InnoDB persistent statistics fail to update
+#		after bulk insert
+#
+CREATE TABLE t1 (a INT PRIMARY KEY)ENGINE=InnoDB
+STATS_PERSISTENT=1 STATS_AUTO_RECALC=1;
+INSERT INTO t1 SELECT * FROM seq_1_to_4096;
+# Wait till statistics update after bulk insert operation
+SELECT n_rows>=4000 FROM mysql.innodb_table_stats WHERE TABLE_NAME="t1";
+n_rows>=4000
+1
+DROP TABLE t1;
+#
+# MDEV-27214 Import with disabled keys corrupts meta-data like rows, indexes, ...
+#
+CREATE TABLE `t1` (
+`id` int(11) NOT NULL,
+`a` int(11) DEFAULT NULL,
+PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=latin1
+STATS_PERSISTENT=1 STATS_AUTO_RECALC=1;
+INSERT INTO `t1` VALUES (1,2),(2,3),(3,4);
+# Wait till statistics update after bulk insert operation
+SELECT TABLE_ROWS, AVG_ROW_LENGTH>0 FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_NAME='t1' AND TABLE_SCHEMA='test';
+TABLE_ROWS	AVG_ROW_LENGTH>0
+3	1
+DROP TABLE t1;
+#
+# MDEV-29975 InnoDB fails to release savepoint during bulk insert
+#
+CREATE TABLE t (c INT KEY) ENGINE=InnoDB;
+begin;
+INSERT INTO t VALUES (0,0);
+ERROR 21S01: Column count doesn't match value count at row 1
+SAVEPOINT a;
+INSERT INTO t VALUES (0),(0);
+ERROR HY000: Got error 1 "Operation not permitted" during COMMIT
+SAVEPOINT a;
+commit;
+SELECT * FROM t;
+c
+DROP TABLE t;
+#
+#  MDEV-29545  InnoDB: Can't find record during replace stmt
+#
+CREATE TABLE t1(c1 INT PRIMARY KEY)ENGINE=InnoDB;
+BEGIN;
+INSERT INTO t1 VALUES(3331);
+connect con1,localhost,root,,,;
+BEGIN;
+SELECT c1 FROM t1;
+c1
+connection default;
+COMMIT;
+connection con1;
+REPLACE INTO t1 VALUES(1984), (1984);
+COMMIT;
+connection default;
+disconnect con1;
+SELECT * FROM t1;
+c1
+1984
+3331
+DROP TABLE t1;
+# End of 10.6 tests
+#
 # MDEV-26947 UNIQUE column checks fail in InnoDB resulting
 #	in table corruption
 #
@@ -240,3 +310,153 @@ SELECT length(f1) FROM t1;
 length(f1)
 8459264
 DROP TABLE t1;
+#
+#  MDEV-27858  Assertion `page_dir_get_n_heap(new_page) == 2U' failed in PageBulk::init
+#
+CREATE TABLE t1 (c INT) ENGINE=InnoDB;
+CREATE TABLE t2 (c INT) ENGINE=InnoDB;
+INSERT INTO t2 VALUES (1);
+LOCK TABLES t1 WRITE,t2 WRITE;
+INSERT INTO t1 VALUES (1);
+INSERT INTO t2 VALUES (1);
+DROP TABLE t2, t1;
+#
+#  MDEV-28138  MariaDB Assertion Failed in mtr_buf_t::has_space
+#
+CREATE TABLE t1(
+f1 SERIAL,
+f2 LINESTRING NOT NULL DEFAULT LineFromText('LINESTRING(1 1,2 2,3 3)'),
+SPATIAL INDEX(f2))ENGINE=InnoDB;
+INSERT INTO t1(f1) VALUES(0), (1), (2);
+ERROR 23000: Duplicate entry '1' for key 'f1'
+DROP TABLE t1;
+#
+#  MDEV-28237  Assertion `0' failed in row_upd_sec_index_entry on DELETE
+#
+CREATE TABLE t1 (c0 YEAR UNIQUE) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (0),(0),(0),(0),(0),(0),(0);
+ERROR HY000: Got error 1 "Operation not permitted" during COMMIT
+DELETE FROM t1;
+DROP TABLE t1;
+#
+#  MDEV-28037 Assertion `trx->bulk_insert' failed in innodb_prepare_commit_versioned
+#
+CREATE TABLE t1 (c INT) ENGINE=InnoDB;
+CREATE TABLE t2 (c INT) ENGINE=InnoDB;
+CREATE TRIGGER tr AFTER INSERT ON t1 FOR EACH ROW UPDATE t2 SET c=1;
+INSERT INTO t1 VALUES (0);
+SELECT * FROM t1;
+c
+0
+SELECT * FROM t2;
+c
+DROP TABLE t2, t1;
+#
+#  MDEV-28242  Assertion `!check_foreigns' failed in
+#                trx_t::check_bulk_buffer
+#
+CREATE TABLE t1 (c INT)ENGINE=InnoDB;
+BEGIN;
+INSERT INTO t1 VALUES(1), (1);
+SET SESSION foreign_key_checks=TRUE;
+SHOW CREATE TABLE t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `c` int(11) DEFAULT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
+CREATE TABLE t2(d INT)ENGINE=InnoDB;
+DROP TABLE t2, t1;
+#
+#  MDEV-28400 Leak in trx_mod_time_t::start_bulk_insert
+#
+SET SESSION foreign_key_checks=0;
+CREATE TABLE t1 (a INT) ENGINE=InnoDB PARTITION BY HASH(a) PARTITIONS 2;
+INSERT INTO t1 VALUES (1),(2);
+ALTER TABLE t1 REBUILD PARTITION p0;
+DROP TABLE t1;
+#
+#  MDEV-29570  InnoDB fails to clean bulk buffer when server
+#			does rollback operation
+#
+CREATE TABLE t1 (pk INT PRIMARY KEY) ENGINE=InnoDB
+PARTITION BY RANGE (pk) (
+PARTITION pn VALUES LESS THAN (20));
+INSERT INTO t1 VALUES (1),(21);
+ERROR HY000: Table has no partition for value 21
+DROP TABLE t1;
+#
+#  MDEV-29761  Bulk insert fails to rollback
+#	during insert..select
+#
+CREATE TABLE t1 (f1 INT)ENGINE=InnoDB;
+CREATE TABLE t2 (f1 INT, UNIQUE INDEX(f1)) ENGINE=InnoDB;
+CREATE TRIGGER tr AFTER INSERT ON t1 FOR EACH ROW INSERT INTO t2 VALUES(1);
+BEGIN;
+INSERT t1 SELECT 1 FROM seq_1_to_2;
+COMMIT;
+SELECT * FROM t1;
+f1
+SELECT * FROM t2;
+f1
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+CHECK TABLE t2;
+Table	Op	Msg_type	Msg_text
+test.t2	check	status	OK
+DROP TABLE t1, t2;
+#
+#   MDEV-29801  Inconsistent ER_TOO_BIG_ROWSIZE during bulk
+#			insert operation
+#
+call mtr.add_suppression("InnoDB: Cannot add field `(c0[36]|c11)` in table");
+SET @format= @@innodb_default_row_format;
+CREATE TABLE t1 (pk int primary key, c01 text, c02 text, c03 text,
+c04 text, c05 text, c06 text, c07 text, c08 text,
+c09 text, c10 text, c11 text, c12 text) ENGINE=InnoDB;
+SET GLOBAL INNODB_DEFAULT_ROW_FORMAT= COMPACT;
+ALTER TABLE t1 FORCE;
+Warnings:
+Warning	139	Row size too large (> 8126). Changing some columns to TEXT or BLOB or using ROW_FORMAT=DYNAMIC or ROW_FORMAT=COMPRESSED may help. In current row format, BLOB prefix of 768 bytes is stored inline.
+INSERT IGNORE INTO t1 VALUES
+(1, REPEAT('x',4805), REPEAT('t',2211), REPEAT('u',974), REPEAT('e',871), REPEAT('z',224), REPEAT('j',978), REPEAT('n',190), REPEAT('t',888), REPEAT('x',32768), REPEAT('e',968), REPEAT('b',913), REPEAT('x',12107)),
+(2, REPEAT('x',4805), REPEAT('t',2211), REPEAT('u',974), REPEAT('e',871), REPEAT('z',224), REPEAT('j',978), REPEAT('n',190), REPEAT('t',888), REPEAT('x',32768), REPEAT('e',968), REPEAT('b',913), REPEAT('x',12107));
+CHECK TABLE t1;
+Table	Op	Msg_type	Msg_text
+test.t1	check	status	OK
+DROP TABLE t1;
+SET GLOBAL INNODB_DEFAULT_ROW_FORMAT= @format;
+#
+#   MDEV-30321 blob data corrupted by row_merge_write_blob_to_tmp_file()
+#
+CREATE TABLE t1 (
+`id` int(11) NOT NULL,
+`data` LONGBLOB NOT NULL,
+PRIMARY KEY (`id`)
+) ENGINE=InnoDB;
+INSERT INTO t1 VALUES 
+(1, REPEAT('X', @@innodb_sort_buffer_size)),
+(2, REPEAT('X', @@innodb_sort_buffer_size));
+SELECT COUNT(*) AS nb_corrupted_rows FROM t1 WHERE data != REPEAT('X', @@innodb_sort_buffer_size);
+nb_corrupted_rows
+0
+DROP TABLE t1;
+# End of 10.7 tests
+#
+#  MDEV-30426  Assertion !rec_offs_nth_extern(offsets2, n)
+#	during bulk insert
+#
+CREATE TABLE t1(f1 TEXT NOT NULL, f2 TEXT NOT NULL,
+f3 TEXT NOT NULL, f4 TEXT NOT NULL,
+f5 TEXT NOT NULL, f6 TEXT NOT NULL,
+PRIMARY KEY(f6(10)))ENGINE=InnoDB;
+BEGIN;
+INSERT INTO t1 VALUES
+(repeat('a', 200), repeat('b', 200), repeat('c', 200),
+repeat('d', 200), repeat('e', 200), repeat('f', 200)),
+(repeat('b', 20000), repeat('c', 16000), repeat('d', 12000),
+repeat('e', 12000), repeat('f', 12000), repeat('f', 12000));
+ERROR HY000: Got error 1 "Operation not permitted" during COMMIT
+COMMIT;
+DROP TABLE t1;
+# End of 10.8 tests

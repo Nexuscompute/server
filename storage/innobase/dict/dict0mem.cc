@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2021, MariaDB Corporation.
+Copyright (c) 2013, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -212,7 +212,7 @@ dict_mem_table_free(
 	    || DICT_TF2_FLAG_IS_SET(table, DICT_TF2_FTS_HAS_DOC_ID)
 	    || DICT_TF2_FLAG_IS_SET(table, DICT_TF2_FTS_ADD_DOC_ID)) {
 		if (table->fts) {
-			fts_free(table);
+			table->fts->~fts_t();
 		}
 	}
 
@@ -1046,32 +1046,6 @@ dict_mem_table_free_foreign_vcol_set(
 }
 
 /**********************************************************************//**
-Adds a field definition to an index. NOTE: does not take a copy
-of the column name if the field is a column. The memory occupied
-by the column name may be released only after publishing the index. */
-void
-dict_mem_index_add_field(
-/*=====================*/
-	dict_index_t*	index,		/*!< in: index */
-	const char*	name,		/*!< in: column name */
-	ulint		prefix_len)	/*!< in: 0 or the column prefix length
-					in a MySQL index like
-					INDEX (textcol(25)) */
-{
-	dict_field_t*	field;
-
-	ut_ad(index);
-	ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
-
-	index->n_def++;
-
-	field = dict_index_get_nth_field(index, unsigned(index->n_def) - 1);
-
-	field->name = name;
-	field->prefix_len = prefix_len & ((1U << 12) - 1);
-}
-
-/**********************************************************************//**
 Frees an index memory object. */
 void
 dict_mem_index_free(
@@ -1197,10 +1171,13 @@ bool dict_foreign_t::affects_fulltext() const
   return false;
 }
 
-/** Reconstruct the clustered index fields. */
-inline void dict_index_t::reconstruct_fields()
+/** Reconstruct the clustered index fields.
+@return whether metadata is incorrect */
+inline bool dict_index_t::reconstruct_fields()
 {
 	DBUG_ASSERT(is_primary());
+
+	const auto old_n_fields = n_fields;
 
 	n_fields = (n_fields + table->instant->n_dropped)
 		& dict_index_t::MAX_N_FIELDS;
@@ -1229,13 +1206,17 @@ inline void dict_index_t::reconstruct_fields()
 		} else {
 			DBUG_ASSERT(!c.is_not_null());
 			const auto old = std::find_if(
-				fields + n_first, fields + n_fields,
+				fields + n_first, fields + old_n_fields,
 				[c](const dict_field_t& o)
 				{ return o.col->ind == c.ind(); });
+
+			if (old >= fields + old_n_fields
+			    || old->prefix_len
+			    || old->col != &table->cols[c.ind()]) {
+				return true;
+			}
+
 			ut_ad(old >= &fields[n_first]);
-			ut_ad(old < &fields[n_fields]);
-			DBUG_ASSERT(!old->prefix_len);
-			DBUG_ASSERT(old->col == &table->cols[c.ind()]);
 			f = *old;
 		}
 
@@ -1248,6 +1229,8 @@ inline void dict_index_t::reconstruct_fields()
 
 	fields = tfields;
 	n_core_null_bytes = static_cast<byte>(UT_BITS_IN_BYTES(n_core_null));
+
+	return false;
 }
 
 /** Reconstruct dropped or reordered columns.
@@ -1312,8 +1295,7 @@ bool dict_table_t::deserialise_columns(const byte* metadata, ulint len)
 	}
 	DBUG_ASSERT(col == &dropped_cols[n_dropped_cols]);
 
-	UT_LIST_GET_FIRST(indexes)->reconstruct_fields();
-	return false;
+	return UT_LIST_GET_FIRST(indexes)->reconstruct_fields();
 }
 
 /** Check if record in clustered index is historical row.
@@ -1351,6 +1333,20 @@ dict_index_t::vers_history_row(
 {
 	ut_ad(!is_primary());
 
+	/*
+	  Get row_end from clustered index
+
+	  TODO (optimization): row_end can be taken from unique secondary index
+	  as well. For that dict_index_t::vers_end member should be added and
+	  updated at index init (dict_index_build_internal_non_clust()).
+
+	  Test case:
+
+		create or replace table t1 (x int unique, y int unique,
+			foreign key r (y) references t1 (x))
+			with system versioning engine innodb;
+		insert into t1 values (1, 1);
+	 */
 	bool error = false;
 	mem_heap_t* heap = NULL;
 	dict_index_t* clust_index = NULL;

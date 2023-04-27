@@ -1,5 +1,5 @@
 /*
-      Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+      Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
       This program is free software; you can redistribute it and/or modify
       it under the terms of the GNU General Public License, version 2.0,
@@ -42,6 +42,11 @@
 #ifdef HAVE_REPLICATION
 THR_LOCK table_replication_connection_configuration::m_table_lock;
 
+PFS_engine_table_share_state
+table_replication_connection_configuration::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_replication_connection_configuration::m_share=
 {
@@ -74,7 +79,9 @@ table_replication_connection_configuration::m_share=
   "IGNORE_SERVER_IDS LONGTEXT not null comment 'Binary log events from servers (ids) to ignore.',"
   "REPL_DO_DOMAIN_IDS LONGTEXT not null comment 'Only apply binary logs from these domain ids.',"
   "REPL_IGNORE_DOMAIN_IDS LONGTEXT not null comment 'Binary log events from domains to ignore.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 static char *convert_array_to_str(DYNAMIC_ARRAY *ids)
@@ -182,7 +189,7 @@ void table_replication_connection_configuration::make_row(Master_info *mi)
   m_row_exists= false;
 
 
-  DBUG_ASSERT(mi != NULL);
+  assert(mi != NULL);
 
   mysql_mutex_lock(&mi->data_lock);
   mysql_mutex_lock(&mi->rli.data_lock);
@@ -297,7 +304,7 @@ int table_replication_connection_configuration::read_row_values(TABLE *table,
   if (unlikely(! m_row_exists))
     return HA_ERR_RECORD_DELETED;
 
-  DBUG_ASSERT(table->s->null_bytes == 0);
+  assert(table->s->null_bytes == 0);
 
   for (; (f= *fields) ; fields++)
   {
@@ -375,7 +382,7 @@ int table_replication_connection_configuration::read_row_values(TABLE *table,
         break;
 
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

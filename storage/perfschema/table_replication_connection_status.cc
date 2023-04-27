@@ -1,5 +1,5 @@
 /*
-      Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+      Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
       This program is free software; you can redistribute it and/or modify
       it under the terms of the GNU General Public License, version 2.0,
@@ -149,6 +149,11 @@ static const TABLE_FIELD_TYPE field_types[]=
 TABLE_FIELD_DEF
 table_replication_connection_status::m_field_def= { 11, field_types };
 
+PFS_engine_table_share_state
+table_replication_connection_status::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_replication_connection_status::m_share=
 {
@@ -161,8 +166,9 @@ table_replication_connection_status::m_share=
   sizeof(pos_t), /* ref length */
   &m_table_lock,
   &m_field_def,
-  false, /* checked */
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_replication_connection_status::create(void)
@@ -249,8 +255,8 @@ void table_replication_connection_status::make_row(Master_info *mi)
   m_row.thread_id_is_null= true;
   m_row.service_state= PS_RPL_CONNECT_SERVICE_STATE_NO;
 
-  DBUG_ASSERT(mi != NULL);
-  DBUG_ASSERT(mi->rli != NULL);
+  assert(mi != NULL);
+  assert(mi->rli != NULL);
 
   mysql_mutex_lock(&mi->data_lock);
   mysql_mutex_lock(&mi->rli->data_lock);
@@ -376,7 +382,7 @@ int table_replication_connection_status::read_row_values(TABLE *table,
   if (unlikely(! m_row_exists))
     return HA_ERR_RECORD_DELETED;
 
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -430,7 +436,7 @@ int table_replication_connection_status::read_row_values(TABLE *table,
         set_field_timestamp(f, m_row.last_error_timestamp);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

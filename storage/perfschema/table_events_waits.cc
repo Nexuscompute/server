@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -39,6 +39,11 @@
 
 THR_LOCK table_events_waits_current::m_table_lock;
 
+PFS_engine_table_share_state
+table_events_waits_current::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_events_waits_current::m_share=
 {
@@ -70,10 +75,17 @@ table_events_waits_current::m_share=
                       "OPERATION VARCHAR(32) not null comment 'Operation type, for example read, write or lock',"
                       "NUMBER_OF_BYTES BIGINT comment 'Number of bytes that the operation read or wrote, or NULL for table I/O waits.',"
                       "FLAGS INTEGER unsigned comment 'Reserved for use in the future.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 THR_LOCK table_events_waits_history::m_table_lock;
+
+PFS_engine_table_share_state
+table_events_waits_history::m_share_state = {
+  false /* m_checked */
+};
 
 PFS_engine_table_share
 table_events_waits_history::m_share=
@@ -106,10 +118,17 @@ table_events_waits_history::m_share=
                       "OPERATION VARCHAR(32) not null comment 'Operation type, for example read, write or lock',"
                       "NUMBER_OF_BYTES BIGINT comment 'Number of bytes that the operation read or wrote, or NULL for table I/O waits.',"
                       "FLAGS INTEGER unsigned comment 'Reserved for use in the future.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 THR_LOCK table_events_waits_history_long::m_table_lock;
+
+PFS_engine_table_share_state
+table_events_waits_history_long::m_share_state = {
+  false /* m_checked */
+};
 
 PFS_engine_table_share
 table_events_waits_history_long::m_share=
@@ -142,7 +161,9 @@ table_events_waits_history_long::m_share=
                       "OPERATION VARCHAR(32) not null comment 'Operation type, for example read, write or lock',"
                       "NUMBER_OF_BYTES BIGINT comment 'Number of bytes that the operation read or wrote, or NULL for table I/O waits.',"
                       "FLAGS INTEGER unsigned comment 'Reserved for use in the future.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 table_events_waits_common::table_events_waits_common
@@ -656,7 +677,7 @@ int table_events_waits_common::read_row_values(TABLE *table,
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 2);
+  assert(table->s->null_bytes == 2);
   buf[0]= 0;
   buf[1]= 0;
 
@@ -788,7 +809,7 @@ int table_events_waits_common::read_row_values(TABLE *table,
         f->set_null();
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -907,7 +928,7 @@ int table_events_waits_current::rnd_pos(const void *pos)
     }
 #endif
 
-    DBUG_ASSERT(m_pos.m_index_2 < WAIT_STACK_LOGICAL_SIZE);
+    assert(m_pos.m_index_2 < WAIT_STACK_LOGICAL_SIZE);
 
     if (wait->m_wait_class != NO_WAIT_CLASS)
     {
@@ -1008,13 +1029,13 @@ int table_events_waits_history::rnd_pos(const void *pos)
   PFS_thread *pfs_thread;
   PFS_events_waits *wait;
 
-  DBUG_ASSERT(events_waits_history_per_thread != 0);
+  assert(events_waits_history_per_thread != 0);
   set_position(pos);
 
   pfs_thread= global_thread_container.get(m_pos.m_index_1);
   if (pfs_thread != NULL)
   {
-    DBUG_ASSERT(m_pos.m_index_2 < events_waits_history_per_thread);
+    assert(m_pos.m_index_2 < events_waits_history_per_thread);
 
     if ( ! pfs_thread->m_waits_history_full &&
         (m_pos.m_index_2 >= pfs_thread->m_waits_history_index))

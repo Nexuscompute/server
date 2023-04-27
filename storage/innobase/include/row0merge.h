@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2005, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2021, MariaDB Corporation.
+Copyright (c) 2015, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -24,8 +24,7 @@ Index build routines using a merge sort
 Created 13/06/2005 Jan Lindstrom
 *******************************************************/
 
-#ifndef row0merge_h
-#define row0merge_h
+#pragma once
 
 #include "que0types.h"
 #include "trx0types.h"
@@ -36,7 +35,8 @@ Created 13/06/2005 Jan Lindstrom
 #include "row0mysql.h"
 #include "lock0types.h"
 #include "srv0srv.h"
-#include "ut0stage.h"
+
+class ut_stage_alter_t;
 
 /* Reserve free space from every block for key_version */
 #define ROW_MERGE_RESERVE_SIZE 4
@@ -109,6 +109,7 @@ struct index_field_t {
 	ulint		prefix_len;	/*!< column prefix length, or 0
 					if indexing the whole column */
 	bool		is_v_col;	/*!< whether this is a virtual column */
+	bool		descending;	/*!< whether to use DESC order */
 };
 
 /** Definition of an index being created */
@@ -216,6 +217,11 @@ row_merge_is_index_usable(
 	const dict_index_t*	index)	/*!< in: index to check */
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
+/** Map from column numbers to column definitions that include
+changes to the collation, when the encoding is compatible with
+the original column and no table rebuild is needed */
+typedef std::map<unsigned, dict_col_t*> col_collations;
+
 /** Build indexes on a table by reading a clustered index, creating a temporary
 file containing index entries, merge sorting these index entries and inserting
 sorted index entries to indexes.
@@ -244,6 +250,7 @@ this function and it will be passed to other functions for further accounting.
 @param[in]	eval_table	mysql table used to evaluate virtual column
 				value, see innobase_get_computed_value().
 @param[in]	allow_non_null	allow the conversion from null to not-null
+@param[in]	col_collate	columns whose collations changed, or nullptr
 @return DB_SUCCESS or error code */
 dberr_t
 row_merge_build_indexes(
@@ -263,7 +270,8 @@ row_merge_build_indexes(
 	ut_stage_alter_t*	stage,
 	const dict_add_v_col_t*	add_v,
 	struct TABLE*		eval_table,
-	bool			allow_non_null)
+	bool			allow_non_null,
+	const col_collations*	col_collate)
 	MY_ATTRIBUTE((warn_unused_result));
 
 /** Write a buffer to a block.
@@ -429,6 +437,10 @@ class row_merge_bulk_t
   ut_new_pfx_t m_block_pfx;
   /** Temporary file to store the blob */
   merge_file_t m_blob_file;
+  /** Storage for description for the crypt_block */
+  ut_new_pfx_t m_crypt_pfx;
+  /** Block for encryption */
+  row_merge_block_t *m_crypt_block= nullptr;
 public:
   /** Constructor.
   Create all merge files, merge buffer for all the table indexes
@@ -482,5 +494,3 @@ public:
   /** Init temporary files for each index */
   void init_tmp_file();
 };
-
-#endif /* row0merge.h */

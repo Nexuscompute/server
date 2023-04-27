@@ -27,7 +27,14 @@ c	CREATE TABLE `c` (
   `d2` datetime NOT NULL,
   PRIMARY KEY (`b`,`d1`),
   CONSTRAINT `b_fk` FOREIGN KEY (`b`) REFERENCES `b` (`b`)
-) ENGINE=InnoDB DEFAULT CHARSET=latin1
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
+CREATE TABLE b (
+b bigint unsigned NOT NULL,
+d1 date NOT NULL,
+PRIMARY KEY (b,d1)
+) ENGINE=InnoDB;
+DROP TABLE b;
+set foreign_key_checks = 1;
 CREATE TABLE b (
 b bigint unsigned NOT NULL,
 d1 date NOT NULL,
@@ -38,6 +45,7 @@ show warnings;
 Level	Code	Message
 Error	1005	Can't create table `bug_fk`.`b` (errno: 150 "Foreign key constraint is incorrectly formed")
 Warning	1215	Cannot add foreign key constraint for `b`
+set foreign_key_checks = 0;
 DROP TABLE IF EXISTS d;
 Warnings:
 Note	1051	Unknown table 'bug_fk.d'
@@ -58,7 +66,7 @@ c	CREATE TABLE `c` (
   `d2` datetime NOT NULL,
   PRIMARY KEY (`b`,`d1`),
   CONSTRAINT `b_fk` FOREIGN KEY (`b`) REFERENCES `b` (`b`)
-) ENGINE=InnoDB DEFAULT CHARSET=latin1
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 show create table d;
 Table	Create Table
 d	CREATE TABLE `d` (
@@ -66,7 +74,7 @@ d	CREATE TABLE `d` (
   `d1` date NOT NULL,
   PRIMARY KEY (`b`,`d1`),
   CONSTRAINT `bd_fk` FOREIGN KEY (`b`) REFERENCES `b` (`b`)
-) ENGINE=InnoDB DEFAULT CHARSET=latin1
+) ENGINE=InnoDB DEFAULT CHARSET=latin1 COLLATE=latin1_swedish_ci
 CREATE TABLE b (
 b bigint unsigned NOT NULL,
 d1 date NOT NULL,

@@ -1,7 +1,7 @@
 /* -*- C++ -*- */
 /*
    Copyright (c) 2002, 2011, Oracle and/or its affiliates.
-   Copyright (c) 2020, MariaDB
+   Copyright (c) 2020, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -124,8 +124,7 @@ public:
   /** Create temporary sp_name object from MDL key. Store in qname_buff */
   sp_name(const MDL_key *key, char *qname_buff);
 
-  ~sp_name()
-  {}
+  ~sp_name() = default;
 };
 
 
@@ -505,6 +504,18 @@ private:
                                                sp_assignment_lex *param_lex,
                                                Item_args *parameters);
 
+  bool bind_input_param(THD *thd,
+                        Item *arg_item,
+                        uint arg_no,
+                        sp_rcontext *nctx,
+                        bool is_function);
+
+  bool bind_output_param(THD *thd,
+                         Item *arg_item,
+                         uint arg_no,
+                         sp_rcontext *octx,
+                         sp_rcontext *nctx);
+
 public:
   /**
     Generate a code for an "OPEN cursor" statement.
@@ -623,6 +634,23 @@ public:
       delete sublex;
     }
     DBUG_RETURN(false);
+  }
+
+  /**
+    Iterate through the LEX stack from the top (the newest) to the bottom
+    (the oldest) and find the one that contains a non-zero spname.
+    @returns - the address of spname, or NULL of no spname found.
+  */
+  const sp_name *find_spname_recursive()
+  {
+    uint count= m_lex.elements;
+    for (uint i= 0; i < count; i++)
+    {
+      const LEX *tmp= m_lex.elem(count - i - 1);
+      if (tmp->spname)
+        return tmp->spname;
+    }
+    return NULL;
   }
 
   /// Put the instruction on the backpatch list, associated with the label.
@@ -1041,8 +1069,9 @@ public:
     Query_arena(thd->lex->sphead->get_main_mem_root(), STMT_INITIALIZED_FOR_SP)
   { }
   ~sp_lex_cursor() { free_items(); }
-  void cleanup_stmt(bool /*restore_set_statement_vars*/) { }
-  Query_arena *query_arena() { return this; }
+  virtual bool cleanup_stmt(bool /*restore_set_statement_vars*/) override
+  { return false; }
+  Query_arena *query_arena() override { return this; }
   bool validate()
   {
     DBUG_ASSERT(sql_command == SQLCOM_SELECT);
@@ -1286,8 +1315,7 @@ public:
     m_query.length= 0;
   }
 
-  virtual ~sp_instr_stmt()
-  {};
+  virtual ~sp_instr_stmt() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1322,8 +1350,7 @@ public:
       m_lex_keeper(lex, lex_resp)
   {}
 
-  virtual ~sp_instr_set()
-  {}
+  virtual ~sp_instr_set() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1366,8 +1393,7 @@ public:
       m_field_offset(field_offset)
   {}
 
-  virtual ~sp_instr_set_row_field()
-  {}
+  virtual ~sp_instr_set_row_field() = default;
 
   virtual int exec_core(THD *thd, uint *nextp);
 
@@ -1409,8 +1435,7 @@ public:
       m_field_name(field_name)
   {}
 
-  virtual ~sp_instr_set_row_field_by_name()
-  {}
+  virtual ~sp_instr_set_row_field_by_name() = default;
 
   virtual int exec_core(THD *thd, uint *nextp);
 
@@ -1436,8 +1461,7 @@ public:
       value(val), m_lex_keeper(lex, TRUE)
   {}
 
-  virtual ~sp_instr_set_trigger_field()
-  {}
+  virtual ~sp_instr_set_trigger_field() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1480,8 +1504,7 @@ public:
       m_dest(dest), m_cont_dest(0), m_optdest(0), m_cont_optdest(0)
   {}
 
-  virtual ~sp_instr_opt_meta()
-  {}
+  virtual ~sp_instr_opt_meta() = default;
 
   virtual void set_destination(uint old_dest, uint new_dest)
     = 0;
@@ -1510,8 +1533,7 @@ public:
     : sp_instr_opt_meta(ip, ctx, dest)
   {}
 
-  virtual ~sp_instr_jump()
-  {}
+  virtual ~sp_instr_jump() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1562,8 +1584,7 @@ public:
       m_lex_keeper(lex, TRUE)
   {}
 
-  virtual ~sp_instr_jump_if_not()
-  {}
+  virtual ~sp_instr_jump_if_not() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1610,8 +1631,7 @@ public:
     : sp_instr(ip, ctx)
   {}
 
-  virtual ~sp_instr_preturn()
-  {}
+  virtual ~sp_instr_preturn() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1642,8 +1662,7 @@ public:
       m_lex_keeper(lex, TRUE)
   {}
 
-  virtual ~sp_instr_freturn()
-  {}
+  virtual ~sp_instr_freturn() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1748,8 +1767,7 @@ public:
     : sp_instr(ip, ctx), m_count(count)
   {}
 
-  virtual ~sp_instr_hpop()
-  {}
+  virtual ~sp_instr_hpop() = default;
 
   void update_count(uint count)
   {
@@ -1782,8 +1800,7 @@ public:
     m_frame(ctx->current_var_count())
   {}
 
-  virtual ~sp_instr_hreturn()
-  {}
+  virtual ~sp_instr_hreturn() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1819,27 +1836,26 @@ public:
     : sp_instr(ip, ctx), m_lex_keeper(lex, TRUE), m_cursor(offset)
   {}
 
-  virtual ~sp_instr_cpush()
-  {}
+  virtual ~sp_instr_cpush() = default;
 
-  virtual int execute(THD *thd, uint *nextp);
+  int execute(THD *thd, uint *nextp) override;
 
-  virtual void print(String *str);
+  void print(String *str) override;
 
   /**
     This call is used to cleanup the instruction when a sensitive
     cursor is closed. For now stored procedures always use materialized
     cursors and the call is not used.
   */
-  virtual void cleanup_stmt(bool /*restore_set_statement_vars*/)
-  { /* no op */ }
+  virtual bool cleanup_stmt(bool /*restore_set_statement_vars*/) override
+  { return false; }
 private:
 
   sp_lex_keeper m_lex_keeper;
   uint m_cursor;                /**< Frame offset (for debugging) */
 
 public:
-  virtual PSI_statement_info* get_psi_info() { return & psi_info; }
+  PSI_statement_info* get_psi_info() override { return & psi_info; }
   static PSI_statement_info psi_info;
 }; // class sp_instr_cpush : public sp_instr
 
@@ -1855,8 +1871,7 @@ public:
     : sp_instr(ip, ctx), m_count(count)
   {}
 
-  virtual ~sp_instr_cpop()
-  {}
+  virtual ~sp_instr_cpop() = default;
 
   void update_count(uint count)
   {
@@ -1888,8 +1903,7 @@ public:
     : sp_instr(ip, ctx), m_cursor(c)
   {}
 
-  virtual ~sp_instr_copen()
-  {}
+  virtual ~sp_instr_copen() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1926,8 +1940,7 @@ public:
       m_cursor(coffs),
       m_var(voffs)
   {}
-  virtual ~sp_instr_cursor_copy_struct()
-  {}
+  virtual ~sp_instr_cursor_copy_struct() = default;
   virtual int execute(THD *thd, uint *nextp);
   virtual int exec_core(THD *thd, uint *nextp);
   virtual void print(String *str);
@@ -1949,8 +1962,7 @@ public:
     : sp_instr(ip, ctx), m_cursor(c)
   {}
 
-  virtual ~sp_instr_cclose()
-  {}
+  virtual ~sp_instr_cclose() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -1979,8 +1991,7 @@ public:
     m_varlist.empty();
   }
 
-  virtual ~sp_instr_cfetch()
-  {}
+  virtual ~sp_instr_cfetch() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -2018,8 +2029,7 @@ public:
   sp_instr_agg_cfetch(uint ip, sp_pcontext *ctx)
     : sp_instr(ip, ctx){}
 
-  virtual ~sp_instr_agg_cfetch()
-  {}
+  virtual ~sp_instr_agg_cfetch() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -2044,8 +2054,7 @@ public:
     : sp_instr(ip, ctx), m_errcode(errcode)
   {}
 
-  virtual ~sp_instr_error()
-  {}
+  virtual ~sp_instr_error() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 
@@ -2078,8 +2087,7 @@ public:
       m_lex_keeper(lex, TRUE)
   {}
 
-  virtual ~sp_instr_set_case_expr()
-  {}
+  virtual ~sp_instr_set_case_expr() = default;
 
   virtual int execute(THD *thd, uint *nextp);
 

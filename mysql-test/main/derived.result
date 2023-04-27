@@ -1207,6 +1207,59 @@ REPLACE INTO v2 ( SELECT * FROM v4 ) UNION ( SELECT f FROM v2 );
 drop view v1,v2,v3,v4;
 drop table t1,t2,t3;
 #
+# MDEV-20325: Assertion `outer_context || !*from_field || *from_field == not_found_field' failed in Item_field::fix_outer_field | `!derived->is_excluded()' failed in TABLE_LIST::set_check_materialized | SIGEGV in st_select_lex::mark_as_dependent (optimized builds)
+#
+CREATE TABLE t1 (a INT);
+# Check that re-execution of a stored routine containing
+# a query with subquery in the FROM clause doesn't result in
+# assert failure in case the 'derived_merge' optimizer option
+# has been turned on/off
+CREATE PROCEDURE sp() SELECT * FROM (SELECT a FROM t1) tb;
+CALL sp();
+a
+SET optimizer_switch='derived_merge=off';
+# Without the patch the following statement would result in assert
+# failure
+CALL sp();
+a
+# Check the same test case for Prepared Statement
+SET optimizer_switch='derived_merge=on';
+PREPARE stmt FROM "SELECT * FROM (SELECT a FROM t1) tb";
+EXECUTE stmt;
+a
+SET optimizer_switch='derived_merge=off';
+# Without the patch the following statement would result in assert
+# failure
+EXECUTE stmt;
+a
+DEALLOCATE PREPARE stmt;
+# Here check the reverse test case - first turn off the 'derived_merge'
+# optimizer option, run the stored routine containing a query with
+# subquery in the FROM clause, then turn on the 'derived_merge'
+# optimizer option and re-execute the same stored routine to check that
+# the routine is finished successfully.
+CREATE PROCEDURE sp1() SELECT * FROM (SELECT a FROM t1) tb;
+SET optimizer_switch='derived_merge=off';
+CALL sp1();
+a
+SET optimizer_switch='derived_merge=on';
+CALL sp1();
+a
+# Check the same test case for Prepared Statement
+SET optimizer_switch='derived_merge=off';
+PREPARE stmt FROM "SELECT * FROM (SELECT a FROM t1) tb";
+EXECUTE stmt;
+a
+SET optimizer_switch='derived_merge=on';
+# Without the patch the following statement would result in assert
+# failure
+EXECUTE stmt;
+a
+DEALLOCATE PREPARE stmt;
+DROP PROCEDURE sp;
+DROP PROCEDURE sp1;
+DROP TABLE t1;
+#
 # End of 10.2 tests
 #
 #
@@ -1263,3 +1316,42 @@ a	a
 4	4
 6	6
 drop table t1,t2,t3;
+#
+# MDEV-16549: Server crashes in Item_field::fix_fields on query with
+# view and subquery, Assertion `context' failed, Assertion `field' failed
+#
+CREATE TABLE t1 (a DECIMAL, b INT);
+INSERT INTO t1 VALUES (1,1),(2,2);
+CREATE VIEW v1 AS SELECT * FROM ( SELECT * FROM t1 WHERE a <> RAND() ) sq;
+SELECT * FROM v1 WHERE b > 0;
+a	b
+1	1
+2	2
+DROP VIEW v1;
+DROP TABLE t1;
+#
+# MDEV-28616: derived table over union with order by clause that
+#             contains subquery with unresolvable column reference
+#
+SELECT 1 FROM (
+SELECT 1 UNION SELECT 2 ORDER BY  (SELECT 1 FROM DUAL WHERE xxx = 0)
+) dt;
+ERROR 42S22: Unknown column 'xxx' in 'where clause'
+create table t1 (a int, b int);
+insert into t1 values (3,8), (7,2), (1,4), (5,9);
+create table t2 (a int, b int);
+insert into t2 values (9,1), (7,3), (2,6);
+create table t3 (c int, d int);
+insert into t3 values (7,8), (1,2), (3,8);
+select * from
+(
+select a,b from t1 where t1.a > 3
+union
+select a,b from t2 where t2.b < 6
+order by (a - b / (select a + max(c) from t3  where d = x))
+) dt;
+ERROR 42S22: Unknown column 'x' in 'where clause'
+drop table t1,t2,t3;
+#
+# End of 10.3 tests
+#

@@ -1,4 +1,7 @@
+--source include/no_valgrind_without_big.inc
 --source include/have_partition.inc
+--source include/have_sequence.inc
+
 #
 # Basic stored PROCEDURE tests
 #
@@ -384,7 +387,7 @@ create function sub3(i int) returns int deterministic
 
 call sub1("sub1a", (select 7))|
 call sub1("sub1b", (select max(i) from t2))|
---error ER_OPERAND_COLUMNS
+--error ER_ILLEGAL_PARAMETER_DATA_TYPES2_FOR_OPERATION
 call sub1("sub1c", (select i,d from t2 limit 1))|
 call sub1("sub1d", (select 1 from (select 1) a))|
 call sub2("sub2")|
@@ -1304,6 +1307,8 @@ create function f1() returns int
   return (select sum(data) from t1)|
 
 # Let us also test some weird cases where no real tables is used
+# enable after fix MDEV-28535
+--disable_view_protocol
 create function f0() returns int
   return (select * from (select 100) as r)|
 select f0()|
@@ -1311,10 +1316,13 @@ select *, f0() from (select 1) as t|
 create view v0 as select f0()|
 select * from v0|
 select *, f0() from v0|
+--enable_view_protocol
 
 #
 # Let us test how well prelocking works with explicit LOCK TABLES.
 #
+#use disable/enable_service_connection after fix MDEV-28535
+--disable_service_connection
 lock tables t1 read, t1 as t11 read|
 # These should work well
 select f3()|
@@ -1331,9 +1339,11 @@ select id, f3() from t1|
 --error ER_TABLE_NOT_LOCKED
 select f4()|
 unlock tables|
+--enable_service_connection
 
 # Let us test how LOCK TABLES which implicitly depends on functions
 # works
+--disable_service_connection
 lock tables v2 read, mysql.proc read|
 select * from v2|
 select * from v1|
@@ -1343,6 +1353,7 @@ select * from v1, t1|
 --error ER_TABLE_NOT_LOCKED
 select f4()|
 unlock tables|
+--enable_service_connection
 
 # Tests for handling of temporary tables in functions.
 #
@@ -1366,6 +1377,7 @@ select f9()|
 select f9() from t1 limit 1|
 
 # Function which uses both temporary and permanent tables.
+--disable_view_protocol
 create function f10() returns int
 begin
   drop temporary table if exists t3;
@@ -1378,6 +1390,7 @@ end|
 select f10()|
 create table t4 as select 1 as id|
 select f10()|
+--enable_view_protocol
 
 create function f11() returns int
 begin
@@ -5996,6 +6009,7 @@ SHOW CREATE FUNCTION bug16211_f2|
 SHOW CREATE FUNCTION mysqltest2.bug16211_f3|
 SHOW CREATE FUNCTION mysqltest2.bug16211_f4|
 
+--disable_service_connection
 SELECT dtd_identifier
 FROM INFORMATION_SCHEMA.ROUTINES
 WHERE ROUTINE_SCHEMA = "mysqltest1" AND ROUTINE_NAME = "bug16211_f1"|
@@ -6011,6 +6025,7 @@ WHERE ROUTINE_SCHEMA = "mysqltest2" AND ROUTINE_NAME = "bug16211_f3"|
 SELECT dtd_identifier
 FROM INFORMATION_SCHEMA.ROUTINES
 WHERE ROUTINE_SCHEMA = "mysqltest2" AND ROUTINE_NAME = "bug16211_f4"|
+--enable_service_connection
 
 SELECT CHARSET(bug16211_f1())|
 SELECT CHARSET(bug16211_f2())|
@@ -10031,6 +10046,46 @@ drop procedure p1|
 drop function f1|
 delimiter ;|
 
+--echo #
+--echo # MDEV-24827: MariaDB 10.5.5 crash (sig 11) during a SELECT
+--echo #
+
+CREATE TABLE t1 (c1 INT PRIMARY KEY, c2 INT);
+CREATE TABLE t2 (c1 INT PRIMARY KEY, c2 INT, KEY idx_c2(c2));
+
+INSERT INTO t1 (c1, c2) SELECT seq, seq FROM seq_1_to_10000;
+INSERT INTO t2 (c1, c2) SELECT seq, seq FROM seq_1_to_20000;
+
+--delimiter $
+
+CREATE OR REPLACE PROCEDURE p1()
+begin
+  DECLARE done INT DEFAULT FALSE;
+  DECLARE a INT;
+
+  DECLARE cur1 CURSOR FOR
+    SELECT t2.c1 AS c1 FROM t1 LEFT JOIN t2 ON t1.c1 = t2.c1
+    WHERE EXISTS (SELECT 1 FROM t1 WHERE c2 = -1) ORDER BY c1;
+
+  DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = TRUE;
+
+  OPEN cur1;
+  read_loop: LOOP
+    FETCH cur1 INTO a;
+    IF done THEN
+      LEAVE read_loop;
+    END IF;
+  END LOOP;
+  CLOSE cur1;
+END $
+
+--delimiter ;
+
+CALL p1();
+
+DROP PROCEDURE p1;
+DROP TABLE t1;
+DROP TABLE t2;
 
 --echo #End of 10.2 tests
 
@@ -10418,6 +10473,21 @@ END;
 $$
 DELIMITER ;$$
 
+--echo #
+--echo # MDEV-28220: Assert failure in sp_head::~sp_head on parsing a syntax incorrect statement CREATE SEQUENCE ... RESTART inside CREATE PROCEDURE/CREATE FUNCTION
+--echo
+
+--echo # Specifying the RESTART clause for the statement CREATE SEQUENCE is a syntax error.
+--echo # Check that CREATE PROCEDURE doesn't crash server if the statement
+--echo # CREATE SEQUNCE ... RESTART is specified in its body.
+--echo #
+--error ER_PARSE_ERROR
+CREATE PROCEDURE sp1() CREATE SEQUENCE s1 START WITH 300 INCREMENT BY 30 RESTART;
+--echo # CREATE SEQUNCE ... RESTART and CREATE SEQUNCE ... RESTART WITH ... are
+--echo # handled by different grammar rules, so check the both cases.
+--error ER_PARSE_ERROR
+CREATE PROCEDURE sp1() CREATE SEQUENCE s1 START WITH 300 INCREMENT BY 30 RESTART WITH 100;
+
 --echo # End of 10.3 tests
 
 
@@ -10438,7 +10508,68 @@ END;
 $$
 DELIMITER ;$$
 
+--echo #
+--echo # MDEV-21173: Assertion `m_thd == __null' failed in sp_head::~sp_head
+--echo #
+CREATE TABLE t1 (a INT);
+--error ER_SUBQUERIES_NOT_SUPPORTED
+CREATE PROCEDURE p1() SELECT 1 FROM t1 PROCEDURE ANALYSE( 10, (SELECT a FROM t1));
+
+DROP TABLE t1;
+
+--echo # End of 10.4 tests
+--echo #
 
 --echo #
---echo # End of 10.4 tests
+--echo # MDEV-29129: Performance regression starting in 10.6: unlimited "select order by limit"
+--echo #
+
+CREATE TABLE t1 (
+  lookupId int primary key,
+  value varchar(255)
+);
+insert into t1 select seq, seq from seq_1_to_100;
+
+-- echo # Note: the function is intentionally NOT declared as DETERMINISTIC
+delimiter //;
+CREATE FUNCTION f1(LOOKUPID_IN INT) RETURNS varchar(255) CHARSET utf8
+BEGIN
+  DECLARE LOOKUP_VALUE VARCHAR(255);
+  SET LOOKUP_VALUE = (SELECT value FROM t1 WHERE lookupId = LOOKUPID_IN);
+  set @counter=@counter+1;
+  RETURN LOOKUP_VALUE;
+END; 
+//
+delimiter ;//
+
+create table t2 (
+  col1 int,
+  col2 int
+);
+insert into t2 select mod(seq,100), seq from seq_1_to_1000;
+
+explain 
+select f1(col1) from t2 order by col2 desc limit 5;
+set @counter=0;
+select f1(col1) from t2 order by col2 desc limit 5;
+--echo # Must show 5, not 1000:
+select @counter;
+drop function f1;
+drop table t1,t2;
+
+--echo #
+--echo # MDEV-28129: MariaDB UAF issue at lex_end_nops(LEX*)
+--echo #
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE sp() SELECT 1 INTO @;
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE sp() SET @=1;
+
+--error ER_PARSE_ERROR
+CREATE PROCEDURE sp() SELECT @;
+
+--echo #
+--echo # End of 10.7 tests
 --echo #

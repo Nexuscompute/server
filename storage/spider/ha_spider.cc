@@ -1,5 +1,5 @@
 /* Copyright (C) 2008-2019 Kentoku Shiba
-   Copyright (C) 2019-2022 MariaDB corp
+   Copyright (C) 2019-2023 MariaDB corp
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -899,9 +899,6 @@ THR_LOCK_DATA **ha_spider::store_lock(
     case TL_READ_HIGH_PRIORITY:
       wide_handler->high_priority = TRUE;
       break;
-    case TL_WRITE_DELAYED:
-      wide_handler->insert_delayed = TRUE;
-      break;
     case TL_WRITE_LOW_PRIORITY:
       wide_handler->low_priority = TRUE;
       break;
@@ -915,7 +912,8 @@ THR_LOCK_DATA **ha_spider::store_lock(
     if (
       wide_handler->sql_command == SQLCOM_DROP_TABLE ||
       wide_handler->sql_command == SQLCOM_ALTER_TABLE ||
-      wide_handler->sql_command == SQLCOM_SHOW_CREATE
+      wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+      wide_handler->sql_command == SQLCOM_SHOW_FIELDS
     ) {
       if (
         lock_type == TL_READ_NO_INSERT &&
@@ -1008,7 +1006,6 @@ THR_LOCK_DATA **ha_spider::store_lock(
         lock_type = TL_READ;
       if (
         lock_type >= TL_WRITE_CONCURRENT_INSERT && lock_type <= TL_WRITE &&
-        lock_type != TL_WRITE_DELAYED &&
         !thd->in_lock_tables && !thd_tablespace_op(thd)
       )
         lock_type = TL_WRITE_ALLOW_WRITE;
@@ -1026,127 +1023,103 @@ int ha_spider::external_lock(
   int error_num = 0;
   SPIDER_TRX *trx;
   backup_error_status();
+
   DBUG_ENTER("ha_spider::external_lock");
-  DBUG_PRINT("info",("spider this=%p", this));
-  DBUG_PRINT("info",("spider lock_type=%x", lock_type));
-#if MYSQL_VERSION_ID < 50500
-  DBUG_PRINT("info",("spider thd->options=%x", (int) thd->options));
-#endif
-#ifdef WITH_PARTITION_STORAGE_ENGINE
-  if (
-    wide_handler->stage == SPD_HND_STAGE_EXTERNAL_LOCK &&
-    wide_handler->stage_executor != this)
+
+  /* Beginning of wide_handler setup */
+  if (wide_handler->stage == SPD_HND_STAGE_EXTERNAL_LOCK)
   {
-    DBUG_RETURN(0);
-  }
-  wide_handler->stage = SPD_HND_STAGE_EXTERNAL_LOCK;
-  wide_handler->stage_executor = this;
-#endif
-#ifdef HANDLER_HAS_NEED_INFO_FOR_AUTO_INC
-  info_auto_called = FALSE;
-#endif
-
-  wide_handler->sql_command = thd_sql_command(thd);
-  if (wide_handler->sql_command == SQLCOM_BEGIN)
-    wide_handler->sql_command = SQLCOM_UNLOCK_TABLES;
-
-  trx = spider_get_trx(thd, TRUE, &error_num);
-  if (error_num)
-    DBUG_RETURN(error_num);
-  wide_handler->trx = trx;
-
-  DBUG_PRINT("info",("spider sql_command=%d", wide_handler->sql_command));
-#ifdef HA_CAN_BULK_ACCESS
-  wide_handler->external_lock_cnt++;
-#endif
-  if (
-    lock_type == F_UNLCK &&
-    wide_handler->sql_command != SQLCOM_UNLOCK_TABLES
-  )
-    DBUG_RETURN(0);
-  if (store_error_num)
-    DBUG_RETURN(store_error_num);
-  wide_handler->external_lock_type = lock_type;
-    if (
-      /* SQLCOM_RENAME_TABLE and SQLCOM_DROP_DB don't come here */
-      wide_handler->sql_command == SQLCOM_DROP_TABLE ||
-      wide_handler->sql_command == SQLCOM_ALTER_TABLE
-    ) {
-      if (trx->locked_connections)
-      {
-        my_message(ER_SPIDER_ALTER_BEFORE_UNLOCK_NUM,
-          ER_SPIDER_ALTER_BEFORE_UNLOCK_STR, MYF(0));
-        DBUG_RETURN(ER_SPIDER_ALTER_BEFORE_UNLOCK_NUM);
-      }
+    /* Only the stage executor deals with table locks. */
+    if (wide_handler->stage_executor != this)
+    {
       DBUG_RETURN(0);
     }
-    if (unlikely((error_num = spider_internal_start_trx(this))))
+  }
+  else
+  {
+    /* Update the stage executor when the stage changes. */
+    wide_handler->stage= SPD_HND_STAGE_EXTERNAL_LOCK;
+    wide_handler->stage_executor= this;
+  }
+
+  info_auto_called = FALSE;
+  wide_handler->external_lock_type= lock_type;
+  wide_handler->sql_command = thd_sql_command(thd);
+
+  trx= spider_get_trx(thd, TRUE, &error_num);
+  if (error_num)
+  {
+    DBUG_RETURN(error_num);
+  }
+  wide_handler->trx= trx;
+  /* End of wide_handler setup */
+
+  if (store_error_num)
+  {
+    DBUG_RETURN(store_error_num);
+  }
+
+  /* We treat BEGIN as if UNLOCK TABLE. */
+  if (wide_handler->sql_command == SQLCOM_BEGIN)
+  {
+    wide_handler->sql_command = SQLCOM_UNLOCK_TABLES;
+  }
+  const uint sql_command= wide_handler->sql_command;
+
+  DBUG_ASSERT(sql_command != SQLCOM_RENAME_TABLE &&
+              sql_command != SQLCOM_DROP_DB);
+
+  if (sql_command == SQLCOM_DROP_TABLE || sql_command == SQLCOM_ALTER_TABLE)
+  {
+    if (trx->locked_connections)
+    {
+      my_message(ER_SPIDER_ALTER_BEFORE_UNLOCK_NUM,
+                 ER_SPIDER_ALTER_BEFORE_UNLOCK_STR, MYF(0));
+      DBUG_RETURN(ER_SPIDER_ALTER_BEFORE_UNLOCK_NUM);
+    }
+    DBUG_RETURN(0);
+  }
+
+  if (lock_type == F_UNLCK)
+  {
+    if (sql_command != SQLCOM_UNLOCK_TABLES)
+    {
+      DBUG_RETURN(0); /* Unlock remote tables only by UNLOCK TABLES. */
+    }
+    if (!trx->locked_connections)
+    {
+      DBUG_RETURN(0); /* No remote table actually locked by Spider */
+    }
+  }
+  else
+  {
+    if (unlikely((error_num= spider_internal_start_trx(this))))
     {
       DBUG_RETURN(error_num);
     }
-
-  if (wide_handler->lock_table_type > 0 ||
-    wide_handler->sql_command == SQLCOM_UNLOCK_TABLES)
-  {
-    if (wide_handler->sql_command == SQLCOM_UNLOCK_TABLES)
+    if (sql_command != SQLCOM_SELECT && sql_command != SQLCOM_HA_READ)
     {
-      /* lock tables does not call reset() */
-      /* unlock tables does not call store_lock() */
-      wide_handler->lock_table_type = 0;
+      trx->updated_in_this_trx= TRUE;
     }
-
-    /* lock/unlock tables */
-#ifdef WITH_PARTITION_STORAGE_ENGINE
-    if (partition_handler && partition_handler->handlers)
+    if (!wide_handler->lock_table_type)
     {
-      uint roop_count;
-      for (roop_count = 0; roop_count < partition_handler->no_parts;
-        ++roop_count)
-      {
-        if (unlikely((error_num =
-          partition_handler->handlers[roop_count]->lock_tables())))
-        {
-          DBUG_RETURN(error_num);
-        }
-      }
-    } else {
-#endif
-      if (unlikely((error_num = lock_tables())))
-      {
-        DBUG_RETURN(error_num);
-      }
-#ifdef WITH_PARTITION_STORAGE_ENGINE
-    }
-#endif
-  }
-
-  DBUG_PRINT("info",("spider trx_start=%s",
-    trx->trx_start ? "TRUE" : "FALSE"));
-  /* need to check after spider_internal_start_trx() */
-  if (trx->trx_start)
-  {
-    switch (wide_handler->sql_command)
-    {
-      case SQLCOM_SELECT:
-      case SQLCOM_HA_READ:
-        /* nothing to do */
-        break;
-      case SQLCOM_UPDATE:
-      case SQLCOM_UPDATE_MULTI:
-      case SQLCOM_CREATE_TABLE:
-      case SQLCOM_INSERT:
-      case SQLCOM_INSERT_SELECT:
-      case SQLCOM_DELETE:
-      case SQLCOM_LOAD:
-      case SQLCOM_REPLACE:
-      case SQLCOM_REPLACE_SELECT:
-      case SQLCOM_DELETE_MULTI:
-      default:
-        trx->updated_in_this_trx = TRUE;
-        DBUG_PRINT("info",("spider trx->updated_in_this_trx=TRUE"));
-        break;
+      DBUG_RETURN(0); /* No need to actually lock remote tables. */
     }
   }
+
+  if (!partition_handler || !partition_handler->handlers)
+  {
+    DBUG_RETURN(lock_tables()); /* Non-partitioned table */
+  }
+
+  for (uint i= 0; i < partition_handler->no_parts; ++i)
+  {
+    if (unlikely((error_num= partition_handler->handlers[i]->lock_tables())))
+    {
+      DBUG_RETURN(error_num);
+    }
+  }
+
   DBUG_RETURN(0);
 }
 
@@ -1237,10 +1210,8 @@ int ha_spider::reset()
 #endif
   result_list.direct_distinct = FALSE;
   store_error_num = 0;
-  if (
-    wide_handler &&
-    wide_handler->sql_command != SQLCOM_END
-  ) {
+  if (wide_handler)
+  {
     wide_handler->sql_command = SQLCOM_END;
     wide_handler->between_flg = FALSE;
     wide_handler->idx_bitmap_is_set = FALSE;
@@ -1252,7 +1223,6 @@ int ha_spider::reset()
     wide_handler->insert_with_update = FALSE;
     wide_handler->low_priority = FALSE;
     wide_handler->high_priority = FALSE;
-    wide_handler->insert_delayed = FALSE;
     wide_handler->lock_table_type = 0;
     wide_handler->semi_trx_isolation_chk = FALSE;
     wide_handler->semi_trx_chk = FALSE;
@@ -8095,7 +8065,8 @@ int ha_spider::info(
             spider_param_table_init_error_interval())
           {
             pthread_mutex_unlock(&share->sts_mutex);
-            if (wide_handler->sql_command == SQLCOM_SHOW_CREATE)
+            if (wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+                wide_handler->sql_command == SQLCOM_SHOW_FIELDS)
             {
               if (thd->is_error())
               {
@@ -8168,7 +8139,8 @@ int ha_spider::info(
                 share->init_error = TRUE;
                 share->init = TRUE;
               }
-              if (wide_handler->sql_command == SQLCOM_SHOW_CREATE)
+              if (wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+                  wide_handler->sql_command == SQLCOM_SHOW_FIELDS)
               {
                 if (thd->is_error())
                 {
@@ -8232,7 +8204,8 @@ int ha_spider::info(
                 share->init_error = TRUE;
                 share->init = TRUE;
               }
-              if (wide_handler->sql_command == SQLCOM_SHOW_CREATE)
+              if (wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+                  wide_handler->sql_command == SQLCOM_SHOW_FIELDS)
               {
                 if (thd->is_error())
                 {
@@ -8261,7 +8234,8 @@ int ha_spider::info(
               if ((error_num = spider_create_sts_thread(share)))
               {
                 pthread_mutex_unlock(&share->sts_mutex);
-                if (wide_handler->sql_command == SQLCOM_SHOW_CREATE)
+                if (wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+                    wide_handler->sql_command == SQLCOM_SHOW_FIELDS)
                 {
                   if (thd->is_error())
                   {
@@ -8292,7 +8266,8 @@ int ha_spider::info(
     {
       if ((error_num = check_crd()))
       {
-        if (wide_handler->sql_command == SQLCOM_SHOW_CREATE)
+        if (wide_handler->sql_command == SQLCOM_SHOW_CREATE ||
+            wide_handler->sql_command == SQLCOM_SHOW_FIELDS)
         {
           if (thd->is_error())
           {
@@ -9038,7 +9013,6 @@ ulonglong ha_spider::table_flags() const
     HA_CAN_FULLTEXT |
     HA_CAN_SQL_HANDLER |
     HA_FILE_BASED |
-    HA_CAN_INSERT_DELAYED |
     HA_CAN_BIT_FIELD |
     HA_NO_COPY_ON_ALTER |
     HA_BINLOG_ROW_CAPABLE |
@@ -9288,6 +9262,9 @@ void ha_spider::get_auto_increment(
   THD *thd = ha_thd();
   int auto_increment_mode = spider_param_auto_increment_mode(thd,
     share->auto_increment_mode);
+  bool rev= table->key_info[table->s->next_number_index].
+              key_part[table->s->next_number_keypart].key_part_flag &
+                HA_REVERSE_SORT;
   DBUG_ENTER("ha_spider::get_auto_increment");
   DBUG_PRINT("info",("spider this=%p", this));
   *nb_reserved_values = ULONGLONG_MAX;
@@ -9307,7 +9284,9 @@ void ha_spider::get_auto_increment(
         table_share->next_number_key_offset);
       error_num = index_read_last_map(table->record[1], key,
         make_prev_keypart_map(table_share->next_number_keypart));
-    } else
+    } else if (rev)
+      error_num = index_first(table->record[1]);
+    else
       error_num = index_last(table->record[1]);
 
     if (error_num)
@@ -11002,6 +10981,16 @@ int ha_spider::create(
     sql_command == SQLCOM_DROP_INDEX
   )
     DBUG_RETURN(0);
+  if (!is_supported_parser_charset(info->default_table_charset))
+  {
+    String charset_option;
+    charset_option.append(STRING_WITH_LEN("CHARSET "));
+    charset_option.append(info->default_table_charset->cs_name);
+    my_error(ER_ILLEGAL_HA_CREATE_OPTION, MYF(0), "SPIDER",
+             charset_option.c_ptr());
+    error_num= ER_ILLEGAL_HA_CREATE_OPTION;
+    goto error_charset;
+  }
   if (!(trx = spider_get_trx(thd, TRUE, &error_num)))
     goto error_get_trx;
   if (
@@ -11176,6 +11165,7 @@ error:
   spider_free_share_alloc(&tmp_share);
 error_alter_before_unlock:
 error_get_trx:
+error_charset:
   DBUG_RETURN(error_num);
 }
 
@@ -13174,7 +13164,6 @@ int ha_spider::sync_from_clone_source(
     update_request = spider->update_request;
     lock_mode = spider->lock_mode;
     high_priority = spider->high_priority;
-    insert_delayed = spider->insert_delayed;
     low_priority = spider->low_priority;
     memcpy(conns, spider->conns,
       sizeof(SPIDER_CONN *) * share->link_count);
@@ -13202,7 +13191,6 @@ int ha_spider::sync_from_clone_source(
     update_request = spider->update_request;
     lock_mode = spider->lock_mode;
     high_priority = spider->high_priority;
-    insert_delayed = spider->insert_delayed;
     low_priority = spider->low_priority;
 
     if ((error_num = spider_check_trx_and_get_conn(

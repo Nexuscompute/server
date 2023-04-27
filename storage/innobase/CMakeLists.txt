@@ -17,9 +17,113 @@
 
 # This is the CMakeLists for InnoDB
 
+INCLUDE(CheckFunctionExists)
+INCLUDE(CheckCSourceCompiles)
+INCLUDE(CheckCSourceRuns)
+INCLUDE(numa)
+INCLUDE(TestBigEndian)
+
+MYSQL_CHECK_NUMA()
+
+INCLUDE(${MYSQL_CMAKE_SCRIPT_DIR}/compile_flags.cmake)
+
+IF(CMAKE_CROSSCOMPILING)
+  # Use CHECK_C_SOURCE_COMPILES instead of CHECK_C_SOURCE_RUNS when
+  # cross-compiling. Not as precise, but usually good enough.
+  # This only make sense for atomic tests in this file, this trick doesn't
+  # work in a general case.
+  MACRO(CHECK_C_SOURCE SOURCE VAR)
+    CHECK_C_SOURCE_COMPILES("${SOURCE}" "${VAR}")
+  ENDMACRO()
+ELSE()
+  MACRO(CHECK_C_SOURCE SOURCE VAR)
+    CHECK_C_SOURCE_RUNS("${SOURCE}" "${VAR}")
+  ENDMACRO()
+ENDIF()
+
+# OS tests
+IF(UNIX)
+  IF(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ADD_DEFINITIONS("-D_GNU_SOURCE=1")
+    IF(HAVE_LIBNUMA)
+      LINK_LIBRARIES(numa)
+    ENDIF()
+  ENDIF()
+ENDIF()
+
+# Enable InnoDB's UNIV_DEBUG in debug builds
+SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DUNIV_DEBUG")
+
+OPTION(WITH_INNODB_AHI "Include innodb_adaptive_hash_index" ON)
+OPTION(WITH_INNODB_ROOT_GUESS "Cache index root block descriptors" ON)
+IF(WITH_INNODB_AHI)
+  ADD_DEFINITIONS(-DBTR_CUR_HASH_ADAPT -DBTR_CUR_ADAPT)
+  IF(NOT WITH_INNODB_ROOT_GUESS)
+    MESSAGE(WARNING "WITH_INNODB_AHI implies WITH_INNODB_ROOT_GUESS")
+    SET(WITH_INNODB_ROOT_GUESS ON)
+  ENDIF()
+ELSEIF(WITH_INNODB_ROOT_GUESS)
+  ADD_DEFINITIONS(-DBTR_CUR_ADAPT)
+ENDIF()
+ADD_FEATURE_INFO(INNODB_AHI WITH_INNODB_AHI "InnoDB Adaptive Hash Index")
+ADD_FEATURE_INFO(INNODB_ROOT_GUESS WITH_INNODB_ROOT_GUESS
+                 "Cache index root block descriptors in InnoDB")
+
+OPTION(WITH_INNODB_EXTRA_DEBUG "Enable extra InnoDB debug checks" OFF)
+IF(WITH_INNODB_EXTRA_DEBUG)
+  ADD_DEFINITIONS(-DUNIV_ZIP_DEBUG)
+ENDIF()
+ADD_FEATURE_INFO(INNODB_EXTRA_DEBUG WITH_INNODB_EXTRA_DEBUG "Extra InnoDB debug checks")
+
+IF(HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE)
+ ADD_DEFINITIONS(-DHAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE=1)
+ENDIF()
+
+IF (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR
+    CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wconversion -Wno-sign-conversion")
+  SET_SOURCE_FILES_PROPERTIES(fts/fts0pars.cc
+    PROPERTIES COMPILE_FLAGS -Wno-conversion)
+ENDIF()
+
+IF(NOT MSVC)
+  # Work around MDEV-18417, MDEV-18656, MDEV-18417
+  IF(WITH_ASAN AND CMAKE_COMPILER_IS_GNUCC AND
+     CMAKE_C_COMPILER_VERSION VERSION_LESS "6.0.0")
+    SET_SOURCE_FILES_PROPERTIES(trx/trx0rec.cc PROPERTIES COMPILE_FLAGS -O1)
+  ENDIF()
+ENDIF(NOT MSVC)
+
+CHECK_FUNCTION_EXISTS(vasprintf  HAVE_VASPRINTF)
+
+# Include directories under innobase
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/innobase/include
+		    ${CMAKE_SOURCE_DIR}/storage/innobase/handler)
+
+# Sun Studio bug with -xO2
+IF(CMAKE_CXX_COMPILER_ID MATCHES "SunPro"
+	AND CMAKE_CXX_FLAGS_RELEASE MATCHES "O2"
+	AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+	# Sun Studio 12 crashes with -xO2 flag, but not with higher optimization
+	# -xO3
+	SET_SOURCE_FILES_PROPERTIES(${CMAKE_CURRENT_SOURCE_DIR}/rem/rem0rec.cc
+    PROPERTIES COMPILE_FLAGS -xO3)
+ENDIF()
 
 
-INCLUDE(innodb.cmake)
+IF(MSVC)
+  # Avoid "unreferenced label" warning in generated file
+  GET_FILENAME_COMPONENT(_SRC_DIR ${CMAKE_CURRENT_LIST_FILE} PATH)
+  SET_SOURCE_FILES_PROPERTIES(${_SRC_DIR}/pars/pars0grm.c
+          PROPERTIES COMPILE_FLAGS "/wd4102")
+  SET_SOURCE_FILES_PROPERTIES(${_SRC_DIR}/pars/lexyy.c
+          PROPERTIES COMPILE_FLAGS "/wd4003")
+ENDIF()
+
+# Include directories under innobase
+INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/storage/innobase/include
+                    ${CMAKE_SOURCE_DIR}/storage/innobase/handler
+                    ${CMAKE_SOURCE_DIR}/libbinlogevents/include)
 INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/tpool)
 
 SET(INNOBASE_SOURCES
@@ -78,19 +182,19 @@ SET(INNOBASE_SOURCES
 	handler/i_s.cc
 	ibuf/ibuf0ibuf.cc
 	include/btr0btr.h
-	include/btr0btr.ic
+	include/btr0btr.inl
 	include/btr0bulk.h
 	include/btr0cur.h
-	include/btr0cur.ic
+	include/btr0cur.inl
 	include/btr0defragment.h
 	include/btr0pcur.h
-	include/btr0pcur.ic
+	include/btr0pcur.inl
 	include/btr0sea.h
-	include/btr0sea.ic
+	include/btr0sea.inl
 	include/btr0types.h
 	include/buf0buddy.h
 	include/buf0buf.h
-	include/buf0buf.ic
+	include/buf0buf.inl
 	include/buf0checksum.h
 	include/buf0dblwr.h
 	include/buf0dump.h
@@ -99,36 +203,35 @@ SET(INNOBASE_SOURCES
 	include/buf0rea.h
 	include/buf0types.h
 	include/data0data.h
-	include/data0data.ic
+	include/data0data.inl
 	include/data0type.h
-	include/data0type.ic
+	include/data0type.inl
 	include/data0types.h
 	include/db0err.h
 	include/dict0boot.h
 	include/dict0crea.h
-	include/dict0crea.ic
+	include/dict0crea.inl
 	include/dict0defrag_bg.h
 	include/dict0dict.h
-	include/dict0dict.ic
+	include/dict0dict.inl
 	include/dict0load.h
 	include/dict0mem.h
-	include/dict0mem.ic
+	include/dict0mem.inl
 	include/dict0pagecompress.h
-	include/dict0pagecompress.ic
+	include/dict0pagecompress.inl
 	include/dict0stats.h
-	include/dict0stats.ic
+	include/dict0stats.inl
 	include/dict0stats_bg.h
 	include/dict0types.h
 	include/dyn0buf.h
 	include/dyn0types.h
 	include/eval0eval.h
-	include/eval0eval.ic
+	include/eval0eval.inl
 	include/eval0proc.h
-	include/eval0proc.ic
+	include/eval0proc.inl
 	include/fil0crypt.h
-	include/fil0crypt.ic
+	include/fil0crypt.inl
 	include/fil0fil.h
-	include/fil0fil.ic
 	include/fil0pagecompress.h
 	include/fsp0file.h
 	include/fsp0fsp.h
@@ -142,135 +245,128 @@ SET(INNOBASE_SOURCES
 	include/fts0pars.h
 	include/fts0plugin.h
 	include/fts0priv.h
-	include/fts0priv.ic
+	include/fts0priv.inl
 	include/fts0tlex.h
 	include/fts0tokenize.h
 	include/fts0types.h
-	include/fts0types.ic
+	include/fts0types.inl
 	include/fts0vlc.h
-	include/fut0fut.h
 	include/fut0lst.h
 	include/gis0geo.h
 	include/gis0rtree.h
-	include/gis0rtree.ic
+	include/gis0rtree.inl
 	include/gis0type.h
 	include/ha_prototypes.h
 	include/ha0ha.h
-	include/ha0ha.ic
+	include/ha0ha.inl
 	include/ha0storage.h
-	include/ha0storage.ic
+	include/ha0storage.inl
 	include/handler0alter.h
 	include/hash0hash.h
 	include/ibuf0ibuf.h
-	include/ibuf0ibuf.ic
-	include/ibuf0types.h
+	include/ibuf0ibuf.inl
 	include/lock0iter.h
 	include/lock0lock.h
-	include/lock0lock.ic
+	include/lock0lock.inl
 	include/lock0prdt.h
 	include/lock0priv.h
-	include/lock0priv.ic
+	include/lock0priv.inl
 	include/lock0types.h
 	include/log0crypt.h
 	include/log0log.h
 	include/log0recv.h
 	include/log0types.h
 	include/mach0data.h
-	include/mach0data.ic
+	include/mach0data.inl
 	include/mem0mem.h
-	include/mem0mem.ic
+	include/mem0mem.inl
 	include/mtr0log.h
 	include/mtr0mtr.h
-	include/mtr0mtr.ic
 	include/mtr0types.h
 	include/os0file.h
-	include/os0file.ic
-	include/os0thread.h
+	include/os0file.inl
 	include/page0cur.h
-	include/page0cur.ic
+	include/page0cur.inl
 	include/page0page.h
-	include/page0page.ic
+	include/page0page.inl
 	include/page0types.h
 	include/page0zip.h
-	include/page0zip.ic
+	include/page0zip.inl
 	include/pars0grm.h
 	include/pars0opt.h
 	include/pars0pars.h
 	include/pars0sym.h
 	include/pars0types.h
 	include/que0que.h
-	include/que0que.ic
+	include/que0que.inl
 	include/que0types.h
 	include/read0types.h
 	include/rem0cmp.h
-	include/rem0cmp.ic
 	include/rem0rec.h
-	include/rem0rec.ic
+	include/rem0rec.inl
 	include/rem0types.h
 	include/row0ext.h
-	include/row0ext.ic
+	include/row0ext.inl
 	include/row0ftsort.h
 	include/row0import.h
 	include/row0ins.h
 	include/row0log.h
-	include/row0log.ic
 	include/row0merge.h
 	include/row0mysql.h
 	include/row0purge.h
 	include/row0quiesce.h
 	include/row0row.h
-	include/row0row.ic
+	include/row0row.inl
 	include/row0sel.h
-	include/row0sel.ic
 	include/row0types.h
 	include/row0uins.h
 	include/row0umod.h
 	include/row0undo.h
 	include/row0upd.h
-	include/row0upd.ic
+	include/row0upd.inl
 	include/row0vers.h
 	include/rw_lock.h
+	include/small_vector.h
 	include/srv0mon.h
-	include/srv0mon.ic
+	include/srv0mon.inl
 	include/srv0srv.h
 	include/srv0start.h
 	include/srw_lock.h
 	include/sux_lock.h
+	include/transactional_lock_guard.h
 	include/trx0i_s.h
 	include/trx0purge.h
 	include/trx0rec.h
-	include/trx0rec.ic
 	include/trx0roll.h
 	include/trx0rseg.h
-	include/trx0rseg.ic
 	include/trx0sys.h
 	include/trx0trx.h
-	include/trx0trx.ic
+	include/trx0trx.inl
 	include/trx0types.h
 	include/trx0undo.h
-	include/trx0undo.ic
+	include/trx0undo.inl
 	include/trx0xa.h
 	include/univ.i
 	include/ut0byte.h
-	include/ut0byte.ic
+	include/ut0byte.inl
 	include/ut0counter.h
 	include/ut0dbg.h
 	include/ut0list.h
-	include/ut0list.ic
+	include/ut0list.inl
 	include/ut0lst.h
 	include/ut0mem.h
-	include/ut0mem.ic
+	include/ut0mem.inl
 	include/ut0new.h
 	include/ut0pool.h
 	include/ut0rbt.h
 	include/ut0rnd.h
-	include/ut0rnd.ic
+	include/ut0rnd.inl
 	include/ut0sort.h
 	include/ut0stage.h
 	include/ut0ut.h
-	include/ut0ut.ic
+	include/ut0ut.inl
 	include/ut0vec.h
-	include/ut0vec.ic
+	include/ut0vec.inl
 	include/ut0wqueue.h
 	lock/lock0iter.cc
 	lock/lock0prdt.cc
@@ -282,7 +378,6 @@ SET(INNOBASE_SOURCES
 	mem/mem0mem.cc
 	mtr/mtr0mtr.cc
 	os/os0file.cc
-	os/os0thread.cc
 	page/page0cur.cc
 	page/page0page.cc
 	page/page0zip.cc
@@ -381,6 +476,20 @@ IF(CMAKE_COMPILER_IS_GNUCXX AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64"
       COMPILE_FLAGS "-O0"
       )
 ENDIF()
+
+# Older gcc version insist on -mhtm flag for including the
+# htmxlintrin.h header. This is also true for new gcc versions
+# like 11.2.0 in Debian Sid
+# s390x because of the way it defines the high level intrinsics
+# as not-inline in the header file can only be included by one
+# source file that has -mhtm enabled.
+IF(CMAKE_SYSTEM_PROCESSOR MATCHES "ppc64|powerpc64|s390x"
+   OR CMAKE_SYSTEM_NAME MATCHES "AIX")
+  ADD_COMPILE_FLAGS(
+      sync/srw_lock.cc
+      COMPILE_FLAGS "-mhtm"
+      )
+ENDIF()
 IF(MSVC)
   IF(CMAKE_SIZEOF_VOID_P EQUAL 8)
    ADD_COMPILE_FLAGS(
@@ -390,6 +499,11 @@ IF(MSVC)
   # silence "switch statement contains 'default' but no 'case' label
   # on generated file.
   TARGET_COMPILE_OPTIONS(innobase PRIVATE "/wd4065")
+ENDIF()
+IF(CMAKE_C_COMPILER_ID MATCHES "Clang" AND
+   NOT CMAKE_C_COMPILER_VERSION VERSION_LESS "13.0.0")
+  ADD_COMPILE_FLAGS(pars/pars0grm.cc fts/fts0pars.cc
+    COMPILE_FLAGS "-Wno-unused-but-set-variable")
 ENDIF()
 
 IF(NOT (PLUGIN_INNOBASE STREQUAL DYNAMIC))

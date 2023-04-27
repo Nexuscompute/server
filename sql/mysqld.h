@@ -332,6 +332,8 @@ extern PSI_mutex_key key_BINLOG_LOCK_index, key_BINLOG_LOCK_xid_list,
   key_LOCK_user_conn, key_LOG_LOCK_log,
   key_master_info_data_lock, key_master_info_run_lock,
   key_master_info_sleep_lock, key_master_info_start_stop_lock,
+  key_master_info_start_alter_lock,
+  key_master_info_start_alter_list_lock,
   key_mutex_slave_reporting_capability_err_lock, key_relay_log_info_data_lock,
   key_relay_log_info_log_space_lock, key_relay_log_info_run_lock,
   key_rpl_group_info_sleep_lock,
@@ -820,7 +822,6 @@ enum options_mysqld
   OPT_SERVER_ID,
   OPT_SILENT,
   OPT_SKIP_HOST_CACHE,
-  OPT_SKIP_RESOLVE,
   OPT_SLAVE_PARALLEL_MODE,
   OPT_SSL_CA,
   OPT_SSL_CAPATH,
@@ -901,6 +902,8 @@ enum enum_query_type
   // it evaluates to. Should be used for error messages, so that they
   // don't reveal values.
   QT_NO_DATA_EXPANSION= (1 << 9),
+  // Remove wrappers added for TVC when creating or showing view
+  QT_NO_WRAPPERS_FOR_TVC_IN_VIEW= (1 << 12),
 };
 
 
@@ -963,7 +966,6 @@ extern my_bool opt_stack_trace, disable_log_notes;
 extern my_bool opt_expect_abort;
 extern my_bool opt_slave_sql_verify_checksum;
 extern my_bool opt_mysql56_temporal_format, strict_password_validation;
-extern my_bool opt_explicit_defaults_for_timestamp;
 extern ulong binlog_checksum_options;
 extern bool max_user_connections_checking;
 extern ulong opt_binlog_dbug_fsync_sleep;
@@ -977,6 +979,7 @@ extern int mysqld_main(int argc, char **argv);
 extern HANDLE hEventShutdown;
 extern void mysqld_win_initiate_shutdown();
 extern void mysqld_win_set_startup_complete();
+extern void mysqld_win_extend_service_timeout(DWORD sec);
 extern void mysqld_set_service_status_callback(void (*)(DWORD, DWORD, DWORD));
 extern void mysqld_win_set_service_name(const char *name);
 #endif

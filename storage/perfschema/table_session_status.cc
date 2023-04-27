@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,6 +35,11 @@
 
 THR_LOCK table_session_status::m_table_lock;
 
+PFS_engine_table_share_state
+table_session_status::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_session_status::m_share=
 {
@@ -49,7 +54,9 @@ table_session_status::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE session_status("
   "VARIABLE_NAME VARCHAR(64) not null comment 'The session status variable name.',"
   "VARIABLE_VALUE VARCHAR(1024) comment 'The session status variable value.')") },
-  true   /* perpetual */
+  true, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -123,7 +130,7 @@ table_session_status::rnd_pos(const void *pos)
     return HA_ERR_RECORD_DELETED;
 
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < m_status_cache.size());
+  assert(m_pos.m_index < m_status_cache.size());
 
   if (m_status_cache.is_materialized())
   {
@@ -159,7 +166,7 @@ int table_session_status
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -175,7 +182,7 @@ int table_session_status
         m_row.m_variable_value.set_field(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

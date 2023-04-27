@@ -25,7 +25,7 @@ static my_bool     ssl_algorithms_added    = FALSE;
 static my_bool     ssl_error_strings_loaded= FALSE;
 
 /* the function below was generated with "openssl dhparam -2 -C 2048" */
-
+#ifndef HAVE_WOLFSSL
 static
 DH *get_dh2048()
 {
@@ -72,6 +72,7 @@ DH *get_dh2048()
     }
     return dh;
 }
+#endif
 
 static const char*
 ssl_error_string[] =
@@ -96,7 +97,7 @@ sslGetErrString(enum enum_ssl_init_error e)
 
 static int
 vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
-                   enum enum_ssl_init_error* error)
+                   my_bool is_client, enum enum_ssl_init_error* error)
 {
   DBUG_ENTER("vio_set_cert_stuff");
   DBUG_PRINT("enter", ("ctx: %p cert_file: %s  key_file: %s",
@@ -133,10 +134,10 @@ vio_set_cert_stuff(SSL_CTX *ctx, const char *cert_file, const char *key_file,
   }
 
   /*
-    If we are using DSA, we can copy the parameters from the private key
-    Now we know that a key and cert have been set against the SSL context
+    If certificate is used check if private key matches.
+    Note, that server side has to use certificate.
   */
-  if (cert_file && !SSL_CTX_check_private_key(ctx))
+  if ((cert_file != NULL || !is_client) && !SSL_CTX_check_private_key(ctx))
   {
     *error= SSL_INITERR_NOMATCH;
     DBUG_PRINT("error", ("%s",sslGetErrString(*error)));
@@ -228,7 +229,6 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
              enum enum_ssl_init_error *error,
              const char *crl_file, const char *crl_path, ulonglong tls_version)
 {
-  DH *dh;
   struct st_VioSSLFd *ssl_fd;
   long ssl_ctx_options;
   DBUG_ENTER("new_VioSSLFd");
@@ -353,24 +353,28 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
 #endif
   }
 
-  if (vio_set_cert_stuff(ssl_fd->ssl_context, cert_file, key_file, error))
+  if (vio_set_cert_stuff(ssl_fd->ssl_context, cert_file, key_file,
+                         is_client_method, error))
   {
     DBUG_PRINT("error", ("vio_set_cert_stuff failed"));
     goto err2;
   }
 
+#ifndef HAVE_WOLFSSL
   /* DH stuff */
   if (!is_client_method)
   {
-    dh=get_dh2048();
+    DH *dh= get_dh2048();
     if (!SSL_CTX_set_tmp_dh(ssl_fd->ssl_context, dh))
     {
       *error= SSL_INITERR_DH;
-      goto err3;
+      DH_free(dh);
+      goto err2;
     }
 
     DH_free(dh);
   }
+#endif
 
 #ifdef HAVE_WOLFSSL
   /* set IO functions used by wolfSSL */
@@ -382,8 +386,6 @@ new_VioSSLFd(const char *key_file, const char *cert_file,
 
   DBUG_RETURN(ssl_fd);
 
-err3:
-  DH_free(dh);
 err2:
   SSL_CTX_free(ssl_fd->ssl_context);
 err1:

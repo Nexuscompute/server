@@ -35,8 +35,6 @@ buffer_pool_bytes_dirty	disabled
 buffer_pool_pages_free	disabled
 buffer_pages_created	disabled
 buffer_pages_written	disabled
-buffer_index_pages_written	disabled
-buffer_non_index_pages_written	disabled
 buffer_pages_read	disabled
 buffer_index_sec_rec_cluster_reads	disabled
 buffer_index_sec_rec_cluster_reads_avoided	disabled
@@ -146,7 +144,6 @@ log_lsn_current	disabled
 log_lsn_checkpoint_age	disabled
 log_lsn_buf_pool_oldest	disabled
 log_max_modified_age_async	disabled
-log_num_log_io	disabled
 log_waits	disabled
 log_write_requests	disabled
 log_writes	disabled
@@ -645,7 +642,7 @@ SET @end = (SELECT COUNT FROM INFORMATION_SCHEMA.INNODB_METRICS WHERE NAME
 = 'lock_rec_lock_created');
 SELECT @end - @start;
 @end - @start
-0
+1
 # Records must not be S/X-locked if a table is X-locked.
 SET @start = @end;
 SET autocommit = 0;

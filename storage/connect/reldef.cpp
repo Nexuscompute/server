@@ -91,9 +91,14 @@ PQRYRES OEMColumns(PGLOBAL g, PTOS topt, char* tab, char* db, bool info)
 	/*  directories are used (to make this even remotely secure).        */
 	/*********************************************************************/
 	if (check_valid_path(module, strlen(module))) {
-		strcpy(g->Message, "Module cannot contain a path");
+		safe_strcpy(g->Message, sizeof(g->Message), "Module cannot contain a path");
 		return NULL;
-	} else
+	}
+	else if (strlen(subtype)+1+3 >= sizeof(getname)) {
+		safe_strcpy(g->Message, sizeof(g->Message), "Subtype string too long");
+		return NULL;
+	}
+	else
 		PlugSetPath(soname, module, GetPluginDir());
 
 	// The exported name is always in uppercase
@@ -109,17 +114,18 @@ PQRYRES OEMColumns(PGLOBAL g, PTOS topt, char* tab, char* db, bool info)
 		char  buf[256];
 		DWORD rc = GetLastError();
 
-		sprintf(g->Message, MSG(DLL_LOAD_ERROR), rc, soname);
+		snprintf(g->Message, sizeof(g->Message), MSG(DLL_LOAD_ERROR), rc, soname);
 		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM |
 			FORMAT_MESSAGE_IGNORE_INSERTS, NULL, rc, 0,
 			(LPTSTR)buf, sizeof(buf), NULL);
-		strcat(strcat(g->Message, ": "), buf);
+		safe_strcat(g->Message, sizeof(g->Message), ": ");
+		safe_strcat(g->Message, sizeof(g->Message), buf);
 		return NULL;
 	} // endif hDll
 
 // Get the function returning an instance of the external DEF class
 	if (!(coldef = (XCOLDEF)GetProcAddress((HINSTANCE)hdll, getname))) {
-		sprintf(g->Message, MSG(PROCADD_ERROR), GetLastError(), getname);
+		snprintf(g->Message, sizeof(g->Message), MSG(PROCADD_ERROR), GetLastError(), getname);
 		FreeLibrary((HMODULE)hdll);
 		return NULL;
 	} // endif coldef
@@ -129,21 +135,21 @@ PQRYRES OEMColumns(PGLOBAL g, PTOS topt, char* tab, char* db, bool info)
 	// Load the desired shared library
 	if (!(hdll = dlopen(soname, RTLD_LAZY))) {
 		error = dlerror();
-		sprintf(g->Message, MSG(SHARED_LIB_ERR), soname, SVP(error));
+		snprintf(g->Message, sizeof(g->Message), MSG(SHARED_LIB_ERR), soname, SVP(error));
 		return NULL;
 	} // endif Hdll
 
 // Get the function returning an instance of the external DEF class
 	if (!(coldef = (XCOLDEF)dlsym(hdll, getname))) {
 		error = dlerror();
-		sprintf(g->Message, MSG(GET_FUNC_ERR), getname, SVP(error));
+		snprintf(g->Message, sizeof(g->Message), MSG(GET_FUNC_ERR), getname, SVP(error));
 		dlclose(hdll);
 		return NULL;
 	} // endif coldef
 #endif  // !_WIN32
 
 	// Just in case the external Get function does not set error messages
-	sprintf(g->Message, "Error getting column info from %s", subtype);
+	snprintf(g->Message, sizeof(g->Message), "Error getting column info from %s", subtype);
 
 	// Get the table column definition
 	qrp = coldef(g, topt, tab, db, info);
@@ -276,7 +282,7 @@ char *RELDEF::GetStringCatInfo(PGLOBAL g, PCSZ what, PCSZ sdef)
     if (IsFileType(GetTypeID(ftype))) {
       name= Hc->GetPartName();
       sval= (char*)PlugSubAlloc(g, NULL, strlen(name) + 12);
-      strcat(strcpy(sval, name), ".");
+      snprintf(sval, strlen(name) + 12, "%s.", name);
       n= strlen(sval);
 
       // Fold ftype to lower case
@@ -515,7 +521,7 @@ int TABDEF::GetColCatInfo(PGLOBAL g)
             case 'T': nof = sizeof(char);     break;
             case 'G': nof = sizeof(longlong); break;
             default:  /* Wrong format */
-              sprintf(g->Message, "Invalid format %c", fty);
+              snprintf(g->Message, sizeof(g->Message), "Invalid format %c", fty);
               return -1;
             } // endswitch fty
 
@@ -618,12 +624,11 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
   /*  directories are used (to make this even remotely secure).        */
   /*********************************************************************/
   if (check_valid_path(Module, strlen(Module))) {
-    strcpy(g->Message, "Module cannot contain a path");
+    safe_strcpy(g->Message, sizeof(g->Message), "Module cannot contain a path");
     return NULL;
   } else
 //  PlugSetPath(soname, Module, GetPluginDir());  // Crashes on Fedora
-    strncat(strcpy(soname, GetPluginDir()), Module,
-			sizeof(soname) - strlen(soname) - 1);
+    snprintf(soname, sizeof(soname), "%s%s", GetPluginDir(), Module);
 
 #if defined(_WIN32)
   // Is the DLL already loaded?
@@ -633,11 +638,12 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
       char  buf[256];
       DWORD rc = GetLastError();
 
-      sprintf(g->Message, MSG(DLL_LOAD_ERROR), rc, soname);
+      snprintf(g->Message, sizeof(g->Message), MSG(DLL_LOAD_ERROR), rc, soname);
       FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM |
                     FORMAT_MESSAGE_IGNORE_INSERTS, NULL, rc, 0,
                     (LPTSTR)buf, sizeof(buf), NULL);
-      strcat(strcat(g->Message, ": "), buf);
+      safe_strcat(g->Message, sizeof(g->Message), ": ");
+      safe_strcat(g->Message, sizeof(g->Message), buf);
       return NULL;
       } // endif hDll
 
@@ -653,11 +659,12 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
     char  buf[256];
     DWORD rc = GetLastError();
 
-    sprintf(g->Message, MSG(PROCADD_ERROR), rc, getname);
+    snprintf(g->Message, sizeof(g->Message), MSG(PROCADD_ERROR), rc, getname);
     FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM |
       FORMAT_MESSAGE_IGNORE_INSERTS, NULL, rc, 0,
       (LPTSTR)buf, sizeof(buf), NULL);
-    strcat(strcat(g->Message, ": "), buf);
+    safe_strcat(g->Message, sizeof(g->Message), ": ");
+    safe_strcat(g->Message, sizeof(g->Message), buf);
     FreeLibrary((HMODULE)Hdll);
     return NULL;
     } // endif getdef
@@ -671,13 +678,13 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
   if (dladdr(&connect_hton, &dl_info)) {
     if (dlopen(dl_info.dli_fname, RTLD_NOLOAD | RTLD_NOW | RTLD_GLOBAL) == 0) {
       error = dlerror();
-      sprintf(g->Message, "dlopen failed: %s, OEM not supported", SVP(error));
+      snprintf(g->Message, sizeof(g->Message), "dlopen failed: %s, OEM not supported", SVP(error));
       return NULL;
       } // endif dlopen
 
   } else {
     error = dlerror();
-    sprintf(g->Message, "dladdr failed: %s, OEM not supported", SVP(error));
+    snprintf(g->Message, sizeof(g->Message), "dladdr failed: %s, OEM not supported", SVP(error));
     return NULL;
   } // endif dladdr
 #endif // 0
@@ -685,7 +692,7 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
   // Load the desired shared library
   if (!Hdll && !(Hdll = dlopen(soname, RTLD_LAZY))) {
     error = dlerror();
-    sprintf(g->Message, MSG(SHARED_LIB_ERR), soname, SVP(error));
+    snprintf(g->Message, sizeof(g->Message), MSG(SHARED_LIB_ERR), soname, SVP(error));
     return NULL;
     } // endif Hdll
 
@@ -699,14 +706,14 @@ PTABDEF OEMDEF::GetXdef(PGLOBAL g)
   // Get the function returning an instance of the external DEF class
   if (!(getdef = (XGETDEF)dlsym(Hdll, getname))) {
     error = dlerror();
-    sprintf(g->Message, MSG(GET_FUNC_ERR), getname, SVP(error));
+    snprintf(g->Message, sizeof(g->Message), MSG(GET_FUNC_ERR), getname, SVP(error));
     dlclose(Hdll);
     return NULL;
     } // endif getdef
 #endif  // !_WIN32
 
   // Just in case the external Get function does not set error messages
-  sprintf(g->Message, MSG(DEF_ALLOC_ERROR), Subtype);
+  snprintf(g->Message, sizeof(g->Message), MSG(DEF_ALLOC_ERROR), Subtype);
 
   // Get the table definition block
   if (!(xdefp = getdef(g, NULL)))
@@ -806,7 +813,7 @@ PTDB OEMDEF::GetTable(PGLOBAL g, MODE mode)
       else
         txfp = new(g) ZLBFAM(defp);
 #else   // !GZ_SUPPORT
-      strcpy(g->Message, "Compress not supported");
+      safe_strcpy(g->Message, sizeof(g->Message), "Compress not supported");
       return NULL;
 #endif  // !GZ_SUPPORT
     } else if (rfm == RECFM_VAR) {
@@ -829,7 +836,7 @@ PTDB OEMDEF::GetTable(PGLOBAL g, MODE mode)
       else
         txfp = new(g) VCTFAM((PVCTDEF)defp);
 #else   // !VCT_SUPPORT
-      strcpy(g->Message, "VCT no more supported");
+      safe_strcpy(g->Message, sizeof(g->Message), "VCT no more supported");
       return NULL;
 #endif  // !VCT_SUPPORT
     } // endif's
@@ -916,11 +923,11 @@ int COLDEF::Define(PGLOBAL g, void *, PCOLINFO cfp, int poff)
     Buf_Type = cfp->Type;
 
     if ((Clen = GetTypeSize(Buf_Type, cfp->Length)) < 0) {
-      sprintf(g->Message, MSG(BAD_COL_TYPE), GetTypeName(Buf_Type), Name);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_COL_TYPE), GetTypeName(Buf_Type), Name);
       return -1;
       } // endswitch
 
-    strcpy(F.Type, GetFormatType(Buf_Type));
+    safe_strcpy(F.Type, sizeof(F.Type), GetFormatType(Buf_Type));
     F.Length = cfp->Length;
     F.Prec = cfp->Scale;
     Offset = (cfp->Offset < 0) ? poff : cfp->Offset;

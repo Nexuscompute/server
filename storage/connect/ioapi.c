@@ -14,8 +14,7 @@
         #define _CRT_SECURE_NO_WARNINGS
 #endif
 
-#if defined(__APPLE__) || defined(IOAPI_NO_64)
-// In darwin and perhaps other BSD variants off_t is a 64 bit value, hence no need for specific 64 bit functions
+#if defined(IOAPI_NO_64)
 #define FOPEN_FUNC(filename, mode) fopen(filename, mode)
 #define FTELLO_FUNC(stream) ftello(stream)
 #define FSEEKO_FUNC(stream, offset, origin) fseeko(stream, offset, origin)
@@ -222,8 +221,7 @@ static int ZCALLBACK ferror_file_func (voidpf opaque __attribute__((unused)), vo
     return ret;
 }
 
-void fill_fopen_filefunc (pzlib_filefunc_def)
-  zlib_filefunc_def* pzlib_filefunc_def;
+void fill_fopen_filefunc (zlib_filefunc_def* pzlib_filefunc_def)
 {
     pzlib_filefunc_def->zopen_file = fopen_file_func;
     pzlib_filefunc_def->zread_file = fread_file_func;

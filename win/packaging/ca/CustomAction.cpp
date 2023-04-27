@@ -187,6 +187,31 @@ bool IsDirectoryEmptyOrNonExisting(const wchar_t *dir) {
   return empty;
 }
 
+extern "C" UINT __stdcall CheckInstallDirectory(MSIHANDLE hInstall)
+{
+  HRESULT hr= S_OK;
+  UINT er= ERROR_SUCCESS;
+  wchar_t *path= 0;
+
+  hr= WcaInitialize(hInstall, __FUNCTION__);
+  ExitOnFailure(hr, "Failed to initialize");
+  WcaGetFormattedString(L"[INSTALLDIR]", &path);
+  if (!IsDirectoryEmptyOrNonExisting(path))
+  {
+    wchar_t msg[2*MAX_PATH];
+    swprintf(msg,countof(msg), L"Installation directory '%s' exists and is not empty. Choose a "
+                  "different install directory",path);
+    WcaSetProperty(L"INSTALLDIRERROR", msg);
+    goto LExit;
+  }
+
+  WcaSetProperty(L"INSTALLDIRERROR", L"");
+
+LExit:
+  ReleaseStr(path);
+  return WcaFinalize(er);
+}
+
 /*
   Check for valid data directory is empty during install
   A valid data directory is non-existing, or empty.
@@ -643,6 +668,12 @@ unsigned long long GetMaxBufferSize(unsigned long long totalPhys)
 
 
 /*
+  Magic undocumented number for bufferpool minimum,
+  allows innodb to start also for all page sizes.
+*/
+static constexpr unsigned long long minBufferpoolMB= 20;
+
+/*
   Checks SERVICENAME, PORT and BUFFERSIZE parameters
 */
 extern "C" UINT  __stdcall CheckDatabaseProperties (MSIHANDLE hInstall)
@@ -770,34 +801,37 @@ extern "C" UINT  __stdcall CheckDatabaseProperties (MSIHANDLE hInstall)
      unsigned long long availableMemory=
        GetMaxBufferSize(memstatus.ullTotalPhys)/ONE_MB;
      swprintf_s(invalidValueMsg,
-        L"Invalid buffer pool size. Please use a number between 1 and %llu",
-         availableMemory);
-     if(BufferPoolSizeLen == 0 || BufferPoolSizeLen > 15)
+        L"Invalid buffer pool size. Please use a number between %llu and %llu",
+         minBufferpoolMB, availableMemory);
+     if (BufferPoolSizeLen == 0 || BufferPoolSizeLen > 15 || !BufferPoolSize[0])
      {
        ErrorMsg= invalidValueMsg;
        goto LExit;
      }
-     for (DWORD i=0; i < BufferPoolSizeLen && BufferPoolSize[BufferPoolSizeLen];
-       i++)
-     {
-       if(BufferPoolSize[i]< '0' || BufferPoolSize[i] > '9')
-       {
-         ErrorMsg= invalidValueMsg;
-         goto LExit;
-       }
-     }
+
      BufferPoolSize[BufferPoolSizeLen]=0;
      MsiSetPropertyW(hInstall, L"BUFFERPOOLSIZE", BufferPoolSize);
-     long long sz = _wtoi64(BufferPoolSize);
-     if(sz <= 0 || sz > (long long)availableMemory)
+     wchar_t *end;
+     unsigned long long sz = wcstoull(BufferPoolSize, &end, 10);
+     if (sz > availableMemory || sz < minBufferpoolMB || *end)
      {
-       if(sz > 0)
+       if (*end == 0)
        {
-         swprintf_s(invalidValueMsg,
-           L"Value for buffer pool size is too large."
-           L"Only approximately %llu MB is available for allocation."
-           L"Please use a number between 1 and %llu.",
-          availableMemory, availableMemory);
+         if(sz > availableMemory)
+         {
+           swprintf_s(invalidValueMsg,
+             L"Value for buffer pool size is too large."
+             L"Only approximately %llu MB is available for allocation."
+             L"Please use a number between %llu and %llu.",
+             availableMemory, minBufferpoolMB, availableMemory);
+         }
+         else if(sz < minBufferpoolMB)
+         {
+           swprintf_s(invalidValueMsg,
+             L"Value for buffer pool size is too small."
+             L"Please use a number between %llu and %llu.",
+             minBufferpoolMB, availableMemory);
+         }
        }
        ErrorMsg= invalidValueMsg;
        goto LExit;

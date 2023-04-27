@@ -1,6 +1,3 @@
---disable_warnings
-drop table if exists t1,t2,t3;
---enable_warnings
 --source include/have_sequence.inc
 SET SQL_WARNINGS=1;
 
@@ -238,7 +235,8 @@ drop table t1;
 #
 # UNIQUE prefix keys and multi-byte charsets
 #
-
+#enable view protocol after fix MDEV-27945
+--disable_view_protocol
 create table t1 (c varchar(30) character set utf8, t text character set utf8, unique (c(2)), unique (t(3))) engine=myisam;
 show create table t1;
 insert t1 values ('cccc', 'tttt'),
@@ -257,6 +255,7 @@ select t from t1 where t='tttt';
 select c from t1 where c=0xD0B1212223D0B1D0B1D0B1D0B1D0B1;
 select t from t1 where t=0xD0B1D0B1212223D0B1D0B1D0B1D0B1;
 drop table t1;
+--enable_view_protocol
 
 #
 # BUG#6151 - myisam index corruption
@@ -603,3 +602,9 @@ EXPLAIN SELECT t1.c, t2.c FROM t1, t2 WHERE t1.b=t2.a and t1.c=t2.b;
 SELECT t1.c, t2.c FROM t1, t2 WHERE t1.b=t2.a and t1.c=t2.b;
 
 drop table t1,t2;
+
+--echo #
+--echo # MDEV-13756 Implement descending index: KEY (a DESC, b ASC)
+--echo #
+create table t1 (a int, b int, key(a), key(a desc));
+drop table t1;

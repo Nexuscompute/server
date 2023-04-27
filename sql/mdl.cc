@@ -1,5 +1,5 @@
 /* Copyright (c) 2007, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2020, 2021, MariaDB
+   Copyright (c) 2020, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -30,6 +30,9 @@
 #include <mysql/psi/mysql_mdl.h>
 #include <algorithm>
 #include <array>
+#ifdef WITH_WSREP
+#include "wsrep_mysqld.h"
+#endif
 
 static PSI_memory_key key_memory_MDL_context_acquire_locks;
 
@@ -247,25 +250,32 @@ private:
   Print a list of all locks to DBUG trace to help with debugging
 */
 
+const char *dbug_print_mdl(MDL_ticket *mdl_ticket)
+{
+  thread_local char buffer[256];
+  MDL_key *mdl_key= mdl_ticket->get_key();
+  my_snprintf(buffer, sizeof(buffer) - 1, "%.*s/%.*s (%s)",
+              (int) mdl_key->db_name_length(), mdl_key->db_name(),
+              (int) mdl_key->name_length(),    mdl_key->name(),
+              mdl_ticket->get_type_name()->str);
+  return buffer;
+}
+
+
 static int mdl_dbug_print_lock(MDL_ticket *mdl_ticket, void *arg, bool granted)
 {
   String *tmp= (String*) arg;
-  char buffer[128];
-  MDL_key *mdl_key= mdl_ticket->get_key();
-  size_t length;
-  length= my_snprintf(buffer, sizeof(buffer)-1,
-                      "\nname: %s  db: %.*s  key_name: %.*s (%s)",
-                      mdl_ticket->get_type_name()->str,
-                      (int) mdl_key->db_name_length(), mdl_key->db_name(),
-                      (int) mdl_key->name_length(),    mdl_key->name(),
-                      granted ? "granted" : "waiting");
+  char buffer[256];
+  size_t length= my_snprintf(buffer, sizeof(buffer) - 1,
+                             "\n    %s (%s)", dbug_print_mdl(mdl_ticket),
+                             granted ? "granted" : "waiting");
   tmp->append(buffer, length);
   return 0;
 }
 
 const char *mdl_dbug_print_locks()
 {
-  static String tmp;
+  thread_local String tmp;
   mdl_iterate(mdl_dbug_print_lock, (void*) &tmp);
   return tmp.c_ptr();
 }
@@ -405,7 +415,7 @@ public:
     virtual bool needs_notification(const MDL_ticket *ticket) const = 0;
     virtual bool conflicting_locks(const MDL_ticket *ticket) const = 0;
     virtual bitmap_t hog_lock_types_bitmap() const = 0;
-    virtual ~MDL_lock_strategy() {}
+    virtual ~MDL_lock_strategy() = default;
   };
 
 
@@ -416,7 +426,7 @@ public:
   */
   struct MDL_scoped_lock : public MDL_lock_strategy
   {
-    MDL_scoped_lock() {}
+    MDL_scoped_lock() = default;
     virtual const bitmap_t *incompatible_granted_types_bitmap() const
     { return m_granted_incompatible; }
     virtual const bitmap_t *incompatible_waiting_types_bitmap() const
@@ -453,7 +463,7 @@ public:
   */
   struct MDL_object_lock : public MDL_lock_strategy
   {
-    MDL_object_lock() {}
+    MDL_object_lock() = default;
     virtual const bitmap_t *incompatible_granted_types_bitmap() const
     { return m_granted_incompatible; }
     virtual const bitmap_t *incompatible_waiting_types_bitmap() const
@@ -497,7 +507,7 @@ public:
 
   struct MDL_backup_lock: public MDL_lock_strategy
   {
-    MDL_backup_lock() {}
+    MDL_backup_lock() = default;
     virtual const bitmap_t *incompatible_granted_types_bitmap() const
     { return m_granted_incompatible; }
     virtual const bitmap_t *incompatible_waiting_types_bitmap() const
@@ -1177,6 +1187,7 @@ MDL_wait::timed_wait(MDL_context_owner *owner, struct timespec *abs_timeout,
          wait_result != ETIMEDOUT && wait_result != ETIME)
   {
 #ifdef WITH_WSREP
+# ifdef ENABLED_DEBUG_SYNC
     // Allow tests to block the applier thread using the DBUG facilities
     DBUG_EXECUTE_IF("sync.wsrep_before_mdl_wait",
                  {
@@ -1186,6 +1197,7 @@ MDL_wait::timed_wait(MDL_context_owner *owner, struct timespec *abs_timeout,
                    DBUG_ASSERT(!debug_sync_set_action((owner->get_thd()),
                                                       STRING_WITH_LEN(act)));
                  };);
+# endif
     if (WSREP_ON && wsrep_thd_is_BF(owner->get_thd(), false))
     {
       wait_result= mysql_cond_wait(&m_COND_wait_status, &m_LOCK_wait_status);
@@ -1735,10 +1747,9 @@ MDL_lock::can_grant_lock(enum_mdl_type type_arg,
 #ifdef WITH_WSREP
   /*
     Approve lock request in BACKUP namespace for BF threads.
-    We should get rid of this code and forbid FTWRL/BACKUP statements
-    when wsrep is active.
   */
-  if ((wsrep_thd_is_toi(requestor_ctx->get_thd()) ||
+  if (!wsrep_check_mode(WSREP_MODE_BF_MARIABACKUP) &&
+      (wsrep_thd_is_toi(requestor_ctx->get_thd()) ||
        wsrep_thd_is_applying(requestor_ctx->get_thd())) &&
       key.mdl_namespace() == MDL_key::BACKUP)
   {
@@ -1864,13 +1875,11 @@ bool MDL_lock::has_pending_conflicting_lock(enum_mdl_type type)
 
 
 MDL_wait_for_graph_visitor::~MDL_wait_for_graph_visitor()
-{
-}
+= default;
 
 
 MDL_wait_for_subgraph::~MDL_wait_for_subgraph()
-{
-}
+= default;
 
 /**
   Check if ticket represents metadata lock of "stronger" or equal type
@@ -2232,8 +2241,8 @@ bool MDL_lock::check_if_conflicting_replication_locks(MDL_context *ctx)
 
       /*
         If the conflicting thread is another parallel replication
-        thread for the same master and it's not in commit stage, then
-        the current transaction has started too early and something is
+        thread for the same master and it's not in commit or post-commit stages,
+        then the current transaction has started too early and something is
         seriously wrong.
       */
       if (conflicting_rgi_slave &&
@@ -2241,7 +2250,9 @@ bool MDL_lock::check_if_conflicting_replication_locks(MDL_context *ctx)
           conflicting_rgi_slave->rli == rgi_slave->rli &&
           conflicting_rgi_slave->current_gtid.domain_id ==
           rgi_slave->current_gtid.domain_id &&
-          !conflicting_rgi_slave->did_mark_start_commit)
+          !((conflicting_rgi_slave->did_mark_start_commit ||
+             conflicting_rgi_slave->worker_error)           ||
+            conflicting_rgi_slave->finish_event_group_called))
         return 1;                               // Fatal error
     }
   }
@@ -2269,13 +2280,19 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
   MDL_ticket *ticket;
   MDL_wait::enum_wait_status wait_status;
   DBUG_ENTER("MDL_context::acquire_lock");
+#ifdef DBUG_TRACE
+  const char *mdl_lock_name= get_mdl_lock_name(
+    mdl_request->key.mdl_namespace(), mdl_request->type)->str;
+#endif
   DBUG_PRINT("enter", ("lock_type: %s  timeout: %f",
-                       get_mdl_lock_name(mdl_request->key.mdl_namespace(),
-                                         mdl_request->type)->str,
+                       mdl_lock_name,
                        lock_wait_timeout));
 
   if (try_acquire_lock_impl(mdl_request, &ticket))
+  {
+    DBUG_PRINT("mdl", ("OOM: %s", mdl_lock_name));
     DBUG_RETURN(TRUE);
+  }
 
   if (mdl_request->ticket)
   {
@@ -2285,8 +2302,13 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
       accordingly, so we can simply return success.
     */
     DBUG_PRINT("info", ("Got lock without waiting"));
+    DBUG_PRINT("mdl", ("Seized:   %s", dbug_print_mdl(mdl_request->ticket)));
     DBUG_RETURN(FALSE);
   }
+
+#ifdef DBUG_TRACE
+    const char *ticket_msg= dbug_print_mdl(ticket);
+#endif
 
   /*
     Our attempt to acquire lock without waiting has failed.
@@ -2298,6 +2320,7 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
 
   if (lock_wait_timeout == 0)
   {
+    DBUG_PRINT("mdl", ("Nowait:  %s", ticket_msg));
     mysql_prlock_unlock(&lock->m_rwlock);
     MDL_ticket::destroy(ticket);
     my_error(ER_LOCK_WAIT_TIMEOUT, MYF(0));
@@ -2358,6 +2381,7 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
     locker= PSI_CALL_start_metadata_wait(&state, ticket->m_psi, __FILE__, __LINE__);
 #endif
 
+  DBUG_PRINT("mdl", ("Waiting:  %s", ticket_msg));
   will_wait_for(ticket);
 
   /* There is a shared or exclusive lock on the object. */
@@ -2415,15 +2439,16 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
     switch (wait_status)
     {
     case MDL_wait::VICTIM:
-      DBUG_LOCK_FILE;
-      DBUG_PRINT("mdl_locks", ("%s", mdl_dbug_print_locks()));
-      DBUG_UNLOCK_FILE;
+      DBUG_PRINT("mdl", ("Deadlock: %s", ticket_msg));
+      DBUG_PRINT("mdl_locks", ("Existing locks:%s", mdl_dbug_print_locks()));
       my_error(ER_LOCK_DEADLOCK, MYF(0));
       break;
     case MDL_wait::TIMEOUT:
+      DBUG_PRINT("mdl", ("Timeout:  %s", ticket_msg));
       my_error(ER_LOCK_WAIT_TIMEOUT, MYF(0));
       break;
     case MDL_wait::KILLED:
+      DBUG_PRINT("mdl", ("Killed:  %s", ticket_msg));
       get_thd()->send_kill_message();
       break;
     default:
@@ -2447,6 +2472,7 @@ MDL_context::acquire_lock(MDL_request *mdl_request, double lock_wait_timeout)
 
   mysql_mdl_set_status(ticket->m_psi, MDL_ticket::GRANTED);
 
+  DBUG_PRINT("mdl", ("Acquired: %s", ticket_msg));
   DBUG_RETURN(FALSE);
 }
 
@@ -2868,6 +2894,7 @@ void MDL_context::release_lock(enum_mdl_duration duration, MDL_ticket *ticket)
                        lock->key.db_name(), lock->key.name()));
 
   DBUG_ASSERT(this == ticket->get_ctx());
+  DBUG_PRINT("mdl", ("Released: %s", dbug_print_mdl(ticket)));
 
   lock->remove_ticket(m_pins, &MDL_lock::m_granted, ticket);
 

@@ -807,10 +807,13 @@ static json_state_handler json_actions[NR_JSON_STATES][NR_C_CLASSES]=
 int json_scan_start(json_engine_t *je,
                     CHARSET_INFO *i_cs, const uchar *str, const uchar *end)
 {
+  static const uchar no_time_to_die= 0;
+
   json_string_setup(&je->s, i_cs, str, end);
   je->stack[0]= JST_DONE;
   je->stack_p= 0;
   je->state= JST_VALUE;
+  je->killed_ptr = (uchar*)&no_time_to_die;
   return 0;
 }
 
@@ -841,7 +844,7 @@ static int skip_key(json_engine_t *j)
 {
   int t_next, c_len;
 
-  if (json_instr_chr_map[j->s.c_next] == S_BKSL &&
+  if (j->s.c_next<128 && json_instr_chr_map[j->s.c_next] == S_BKSL &&
       json_handle_esc(&j->s))
     return 1;
 
@@ -971,7 +974,7 @@ int json_scan_next(json_engine_t *j)
   int t_next;
 
   get_first_nonspace(&j->s, &t_next, &j->sav_c_len);
-  return json_actions[j->state][t_next](j);
+  return *j->killed_ptr || json_actions[j->state][t_next](j);
 }
 
 
@@ -1764,107 +1767,6 @@ int json_get_path_next(json_engine_t *je, json_path_t *p)
   } while (json_scan_next(je) == 0);
 
   return 1;
-}
-
-
-int json_path_parts_compare(
-    const json_path_step_t *a, const json_path_step_t *a_end,
-    const json_path_step_t *b, const json_path_step_t *b_end,
-    enum json_value_types vt)
-{
-  int res, res2;
-
-  while (a <= a_end)
-  {
-    if (b > b_end)
-    {
-      while (vt != JSON_VALUE_ARRAY &&
-             (a->type & JSON_PATH_ARRAY_WILD) == JSON_PATH_ARRAY &&
-             a->n_item == 0)
-      {
-        if (++a > a_end)
-          return 0;
-      }
-      return -2;
-    }
-
-    DBUG_ASSERT((b->type & (JSON_PATH_WILD | JSON_PATH_DOUBLE_WILD)) == 0);
-
-    
-    if (a->type & JSON_PATH_ARRAY)
-    {
-      if (b->type & JSON_PATH_ARRAY)
-      {
-        if ((a->type & JSON_PATH_WILD) || a->n_item == b->n_item)
-          goto step_fits;
-        goto step_failed;
-      }
-      if ((a->type & JSON_PATH_WILD) == 0 && a->n_item == 0)
-        goto step_fits_autowrap;
-      goto step_failed;
-    }
-    else /* JSON_PATH_KEY */
-    {
-      if (!(b->type & JSON_PATH_KEY))
-        goto step_failed;
-    
-      if (!(a->type & JSON_PATH_WILD) &&
-          (a->key_end - a->key != b->key_end - b->key ||
-           memcmp(a->key, b->key, a->key_end - a->key) != 0))
-        goto step_failed;
-
-      goto step_fits;
-    }
-step_failed:
-    if (!(a->type & JSON_PATH_DOUBLE_WILD))
-      return -1;
-    b++;
-    continue;
-
-step_fits:
-    b++;
-    if (!(a->type & JSON_PATH_DOUBLE_WILD))
-    {
-      a++;
-      continue;
-    }
-
-    /* Double wild handling needs recursions. */
-    res= json_path_parts_compare(a+1, a_end, b, b_end, vt);
-    if (res == 0)
-      return 0;
-
-    res2= json_path_parts_compare(a, a_end, b, b_end, vt);
-
-    return (res2 >= 0) ? res2 : res;
-
-step_fits_autowrap:
-    if (!(a->type & JSON_PATH_DOUBLE_WILD))
-    {
-      a++;
-      continue;
-    }
-
-    /* Double wild handling needs recursions. */
-    res= json_path_parts_compare(a+1, a_end, b+1, b_end, vt);
-    if (res == 0)
-      return 0;
-
-    res2= json_path_parts_compare(a, a_end, b+1, b_end, vt);
-
-    return (res2 >= 0) ? res2 : res;
-
-  }
-
-  return b <= b_end;
-}
-
-
-int json_path_compare(const json_path_t *a, const json_path_t *b,
-                      enum json_value_types vt)
-{
-  return json_path_parts_compare(a->steps+1, a->last_step,
-                                 b->steps+1, b->last_step, vt);
 }
 
 

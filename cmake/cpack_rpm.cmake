@@ -29,7 +29,7 @@ SET(CPACK_COMPONENT_BACKUP_GROUP "backup")
 
 SET(CPACK_COMPONENTS_ALL Server ManPagesServer IniFiles Server_Scripts
                          SupportFiles Development ManPagesDevelopment
-                         ManPagesTest Readme ManPagesClient Test 
+                         ManPagesTest Readme ManPagesClient Test
                          Common Client SharedLibraries ClientPlugins
                          backup
 )
@@ -155,6 +155,7 @@ SET(ignored
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/doc"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man1"
+  "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man3"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/man/man8"
   "%ignore ${CMAKE_INSTALL_PREFIX}/share/pkgconfig"
   )
@@ -197,6 +198,8 @@ SETA(CPACK_RPM_devel_PACKAGE_OBSOLETES
   "MySQL-devel")
 SETA(CPACK_RPM_devel_PACKAGE_PROVIDES
   "MySQL-devel")
+SETA(CPACK_RPM_devel_PACKAGE_REQUIRES
+  "MariaDB-shared >= 10.2.42")
 
 SETA(CPACK_RPM_server_PACKAGE_OBSOLETES
   "MariaDB"
@@ -268,7 +271,7 @@ ELSEIF(RPM MATCHES "fedora" OR RPM MATCHES "(rhel|centos)7")
   ALTERNATIVE_NAME("server" "mariadb-server")
   ALTERNATIVE_NAME("server" "mysql-compat-server")
   ALTERNATIVE_NAME("test"   "mariadb-test")
-ELSEIF(RPM MATCHES "(rhel|centos)8")
+ELSEIF(RPM MATCHES "(rhel|centos|rocky)[89]")
   SET(epoch 3:)
   ALTERNATIVE_NAME("backup" "mariadb-backup")
   ALTERNATIVE_NAME("client" "mariadb")
@@ -338,7 +341,7 @@ IF(compat53 AND compat101)
   # RHEL6/CentOS6 install Postfix by default, and it requires
   # libmysqlclient.so.16 that pulls in mysql-libs-5.1.x
   # And the latter conflicts with our rpms.
-  # Make sure that for these distribuions all our rpms require
+  # Make sure that for these distributions all our rpms require
   # MariaDB-compat, that will replace mysql-libs-5.1
   IF(RPM MATCHES "(rhel|centos)[67]")
     SET(CPACK_RPM_common_PACKAGE_REQUIRES "MariaDB-compat")
@@ -358,9 +361,11 @@ MACRO(ADDIF var)
   ENDIF()
 ENDMACRO()
 
+ADDIF(MYSQL_MAINTAINER_MODE)
 ADDIF(CMAKE_BUILD_TYPE)
 ADDIF(BUILD_CONFIG)
 ADDIF(WITH_SSL)
+ADDIF(WITH_JEMALLOC)
 
 ENDIF()
 ENDIF(RPM)

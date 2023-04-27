@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2021, MariaDB Corporation.
+   Copyright (c) 2009, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -37,6 +37,9 @@
 #include "sql_partition.h"
 #include "sql_partition_admin.h"               // Sql_cmd_alter_table_*_part
 #include "event_parse_data.h"
+#ifdef WITH_WSREP
+#include "mysql/service_wsrep.h"
+#endif
 
 void LEX::parse_error(uint err_number)
 {
@@ -615,6 +618,13 @@ Query_tables_list::binlog_stmt_unsafe_errcode[BINLOG_STMT_UNSAFE_COUNT] =
   ER_BINLOG_UNSAFE_UPDATE_IGNORE,
   ER_BINLOG_UNSAFE_INSERT_TWO_KEYS,
   ER_BINLOG_UNSAFE_AUTOINC_NOT_FIRST,
+  /*
+    There is no need to add new error code as we plan to get rid of auto
+    increment lock mode variable, so we use existing error code below, add
+    the correspondent text to the existing error message during merging to
+    non-GA release.
+  */
+  ER_BINLOG_UNSAFE_SYSTEM_VARIABLE,
   ER_BINLOG_UNSAFE_SKIP_LOCKED
 };
 
@@ -738,7 +748,6 @@ init_lex_with_single_table(THD *thd, TABLE *table, LEX *lex)
     return TRUE;
   context->resolve_in_table_list_only(table_list);
   lex->use_only_table_context= TRUE;
-  lex->context_analysis_only|= CONTEXT_ANALYSIS_ONLY_VCOL_EXPR;
   select_lex->cur_pos_in_select_list= UNDEF_POS;
   table->map= 1; //To ensure correct calculation of const item
   table_list->table= table;
@@ -1231,6 +1240,7 @@ void LEX::start(THD *thd_arg)
   context_stack.empty();
   //empty select_stack
   select_stack_top= 0;
+  select_stack_outer_barrier= 0;
   unit.init_query();
   current_select_number= 0;
   curr_with_clause= 0;
@@ -1307,13 +1317,13 @@ void LEX::start(THD *thd_arg)
   stmt_var_list.empty();
   proc_list.elements=0;
 
-  save_group_list.empty();
-  save_order_list.empty();
   win_ref= NULL;
   win_frame= NULL;
   frame_top_bound= NULL;
   frame_bottom_bound= NULL;
   win_spec= NULL;
+
+  upd_del_where= NULL;
 
   vers_conditions.empty();
   period_conditions.empty();
@@ -2804,7 +2814,6 @@ int Lex_input_stream::scan_ident_delimited(THD *thd,
                                            uchar quote_char)
 {
   CHARSET_INFO *const cs= thd->charset();
-  uint double_quotes= 0;
   uchar c;
   DBUG_ASSERT(m_ptr == m_tok_start + 1);
 
@@ -2829,7 +2838,6 @@ int Lex_input_stream::scan_ident_delimited(THD *thd,
         if (yyPeek() != quote_char)
           break;
         c= yyGet();
-        double_quotes++;
         continue;
       }
     }
@@ -2943,6 +2951,7 @@ void st_select_lex::init_query()
   min_max_opt_list.empty();
   limit_params.clear();
   join= 0;
+  cur_pos_in_select_list= UNDEF_POS;
   having= prep_having= where= prep_where= 0;
   cond_pushed_into_where= cond_pushed_into_having= 0;
   attach_to_conds.empty();
@@ -2993,6 +3002,8 @@ void st_select_lex::init_query()
   prep_leaf_list_state= UNINIT;
   bzero((char*) expr_cache_may_be_used, sizeof(expr_cache_may_be_used));
   select_list_tables= 0;
+  rownum_in_field_list= 0;
+
   window_specs.empty();
   window_funcs.empty();
   tvc= 0;
@@ -3047,6 +3058,7 @@ void st_select_lex::init_select()
   in_funcs.empty();
   curr_tvc_name= 0;
   versioned_tables= 0;
+  is_tvc_wrapper= false;
   nest_flags= 0;
 }
 
@@ -3066,23 +3078,9 @@ void st_select_lex_node::include_down(st_select_lex_node *upper)
 }
 
 
-void st_select_lex_node::add_slave(st_select_lex_node *slave_arg)
+void st_select_lex_node::attach_single(st_select_lex_node *slave_arg)
 {
-  for (; slave; slave= slave->next)
-    if (slave == slave_arg)
-      return;
-
-  if (slave)
-  {
-    st_select_lex_node *slave_arg_slave= slave_arg->slave;
-    /* Insert in the front of list of slaves if any. */
-    slave_arg->include_neighbour(slave);
-    /* include_neighbour() sets slave_arg->slave=0, restore it. */
-    slave_arg->slave= slave_arg_slave;
-    /* Count on include_neighbour() setting the master. */
-    DBUG_ASSERT(slave_arg->master == this);
-  }
-  else
+  DBUG_ASSERT(slave == 0);
   {
     slave= slave_arg;
     slave_arg->master= this;
@@ -3179,6 +3177,7 @@ void st_select_lex_node::fast_exclude()
   for (; slave; slave= slave->next)
     slave->fast_exclude();
 
+  prev= NULL; // to ensure correct behavior of st_select_lex_unit::is_excluded()
 }
 
 
@@ -3253,9 +3252,7 @@ void st_select_lex_node::exclude_from_tree()
 */
 void st_select_lex_node::exclude()
 {
-  /* exclude from global list */
-  fast_exclude();
-  /* exclude from other structures */
+  /* exclude the node from the tree  */
   exclude_from_tree();
   /* 
      We do not need following statements, because prev pointer of first 
@@ -3263,6 +3260,8 @@ void st_select_lex_node::exclude()
      if (master->slave == this)
        master->slave= next;
   */
+  /* exclude all nodes under this excluded node */
+  fast_exclude();
 }
 
 
@@ -3984,57 +3983,54 @@ LEX::LEX()
 }
 
 
+bool LEX::can_be_merged()
+{
+  return unit.can_be_merged();
+}
+
+
 /*
-  Check whether the merging algorithm can be used on this VIEW
+  Check whether the merging algorithm can be used for this unit
 
   SYNOPSIS
-    LEX::can_be_merged()
+    st_select_lex_unit::can_be_merged()
 
   DESCRIPTION
-    We can apply merge algorithm if it is single SELECT view  with
-    subqueries only in WHERE clause (we do not count SELECTs of underlying
-    views, and second level subqueries) and we have not grpouping, ordering,
-    HAVING clause, aggregate functions, DISTINCT clause, LIMIT clause and
-    several underlying tables.
+    We can apply merge algorithm for a unit if it is single SELECT with
+    subqueries only in WHERE clauses or in ON conditions or in select list
+    (we do not count SELECTs of underlying  views/derived tables/CTEs and
+    second level subqueries) and we have no grouping, ordering, HAVING
+    clause, aggregate functions, DISTINCT clause, LIMIT clause.
 
   RETURN
     FALSE - only temporary table algorithm can be used
     TRUE  - merge algorithm can be used
 */
 
-bool LEX::can_be_merged()
+bool st_select_lex_unit::can_be_merged()
 {
   // TODO: do not forget implement case when select_lex.table_list.elements==0
 
   /* find non VIEW subqueries/unions */
-  bool selects_allow_merge= (first_select_lex()->next_select() == 0 &&
-                             !(first_select_lex()->uncacheable &
-                               UNCACHEABLE_RAND));
-  if (selects_allow_merge)
-  {
-    for (SELECT_LEX_UNIT *tmp_unit= first_select_lex()->first_inner_unit();
-         tmp_unit;
-         tmp_unit= tmp_unit->next_unit())
-    {
-      if (tmp_unit->first_select()->parent_lex == this &&
-          (tmp_unit->item != 0 &&
-           (tmp_unit->item->place() != IN_WHERE &&
-            tmp_unit->item->place() != IN_ON &&
-            tmp_unit->item->place() != SELECT_LIST)))
-      {
-        selects_allow_merge= 0;
-        break;
-      }
-    }
-  }
+  st_select_lex *fs= first_select();
 
-  return (selects_allow_merge &&
-          first_select_lex()->group_list.elements == 0 &&
-          first_select_lex()->having == 0 &&
-          first_select_lex()->with_sum_func == 0 &&
-          first_select_lex()->table_list.elements >= 1 &&
-          !(first_select_lex()->options & SELECT_DISTINCT) &&
-          first_select_lex()->limit_params.select_limit == 0);
+  if (fs->next_select() ||
+      (fs->uncacheable & UNCACHEABLE_RAND) ||
+      (fs->options & SELECT_DISTINCT) ||
+      fs->group_list.elements || fs->having ||
+      fs->with_sum_func ||
+      fs->table_list.elements < 1 ||
+      fs->limit_params.select_limit)
+    return false;
+  for (SELECT_LEX_UNIT *tmp_unit= fs->first_inner_unit();
+       tmp_unit;
+       tmp_unit= tmp_unit->next_unit())
+    if ((tmp_unit->item != 0 &&
+         (tmp_unit->item->place() != IN_WHERE &&
+          tmp_unit->item->place() != IN_ON &&
+          tmp_unit->item->place() != SELECT_LIST)))
+      return false;
+  return true;
 }
 
 
@@ -4109,9 +4105,7 @@ bool LEX::can_not_use_merged(bool no_update_or_delete)
 
   case SQLCOM_UPDATE_MULTI:
   case SQLCOM_DELETE_MULTI:
-    if (no_update_or_delete)
-      return TRUE;
-    /* Fall through */
+    return no_update_or_delete;
 
   default:
     return FALSE;
@@ -4965,7 +4959,21 @@ bool st_select_lex::optimize_unflattened_subqueries(bool const_only)
       }
       if (empty_union_result)
         subquery_predicate->no_rows_in_result();
-      if (!is_correlated_unit)
+
+      if (is_correlated_unit)
+      {
+        /*
+          Some parts of UNION are not correlated. This means we will need to
+          re-execute the whole UNION every time. Mark all parts of the UNION
+          as correlated so that they are prepared to be executed multiple
+          times (if we don't do that, some part of the UNION may free its
+          execution data at the end of first execution and crash on the second
+          execution)
+        */
+        for (SELECT_LEX *sl= un->first_select(); sl; sl= sl->next_select())
+          sl->uncacheable |= UNCACHEABLE_DEPENDENT;
+      }
+      else
         un->uncacheable&= ~UNCACHEABLE_DEPENDENT;
       subquery_predicate->is_correlated= is_correlated_unit;
     }
@@ -5301,17 +5309,21 @@ void SELECT_LEX::update_used_tables()
   while ((tl= ti++))
   {
     TABLE_LIST *embedding= tl;
-    do
+    if (!is_eliminated_table(join->eliminated_tables, tl))
     {
-      bool maybe_null;
-      if ((maybe_null= MY_TEST(embedding->outer_join)))
+      do
       {
-        tl->table->maybe_null= maybe_null;
-        break;
+        bool maybe_null;
+        if ((maybe_null= MY_TEST(embedding->outer_join)))
+        {
+          tl->table->maybe_null= maybe_null;
+          break;
+        }
       }
+      while ((embedding= embedding->embedding));
     }
-    while ((embedding= embedding->embedding));
-    if (tl->on_expr)
+
+    if (tl->on_expr && !is_eliminated_table(join->eliminated_tables, tl))
     {
       tl->on_expr->update_used_tables();
       tl->on_expr->walk(&Item::eval_not_null_tables, 0, NULL);
@@ -5338,8 +5350,11 @@ void SELECT_LEX::update_used_tables()
       if (embedding->on_expr && 
           embedding->nested_join->join_list.head() == tl)
       {
-        embedding->on_expr->update_used_tables();
-        embedding->on_expr->walk(&Item::eval_not_null_tables, 0, NULL);
+        if (!is_eliminated_table(join->eliminated_tables, embedding))
+        {
+          embedding->on_expr->update_used_tables();
+          embedding->on_expr->walk(&Item::eval_not_null_tables, 0, NULL);
+        }
       }
       tl= embedding;
       embedding= tl->embedding;
@@ -5902,18 +5917,19 @@ void LEX::free_arena_for_set_stmt()
   DBUG_VOID_RETURN;
 }
 
-void LEX::restore_set_statement_var()
+bool LEX::restore_set_statement_var()
 {
+  bool err= false;
   DBUG_ENTER("LEX::restore_set_statement_var");
   if (!old_var_list.is_empty())
   {
     DBUG_PRINT("info", ("vars: %d", old_var_list.elements));
-    sql_set_variables(thd, &old_var_list, false);
+    err= sql_set_variables(thd, &old_var_list, false);
     old_var_list.empty();
     free_arena_for_set_stmt();
   }
   DBUG_ASSERT(!is_arena_for_set_stmt());
-  DBUG_VOID_RETURN;
+  DBUG_RETURN(err);
 }
 
 unit_common_op st_select_lex_unit::common_op()
@@ -7130,6 +7146,27 @@ bool LEX::sp_declare_cursor(THD *thd, const LEX_CSTRING *name,
   uint offp;
   sp_instr_cpush *i;
 
+  /* In some cases param_ctx can be NULL. e.g.: FOR rec IN (SELECT...) */
+  if (param_ctx)
+  {
+    for (uint prm= 0; prm < param_ctx->context_var_count(); prm++)
+    {
+      const sp_variable *param= param_ctx->get_context_variable(prm);
+      if (param->mode != sp_variable::MODE_IN)
+      {
+        /*
+          PL/SQL supports the IN keyword in cursor parameters.
+          We also support this for compatibility. Note, OUT/INOUT parameters
+          will unlikely be ever supported. So "YET" may sound confusing here.
+          But it should be better than using a generic error. Adding a dedicated
+          error message for this small issue is not desirable.
+        */
+        my_error(ER_NOT_SUPPORTED_YET, MYF(0), "OUT/INOUT cursor parameter");
+        return true;
+      }
+    }
+  }
+
   if (spcont->find_cursor(name, &offp, true))
   {
     my_error(ER_SP_DUP_CURS, MYF(0), name->str);
@@ -7771,7 +7808,7 @@ bool LEX::maybe_start_compound_statement(THD *thd)
     if (!make_sp_head(thd, NULL, &sp_handler_procedure, DEFAULT_AGGREGATE))
       return true;
     sphead->set_suid(SP_IS_NOT_SUID);
-    sphead->set_body_start(thd, thd->m_parser_state->m_lip.get_cpp_ptr());
+    sphead->set_body_start(thd, thd->m_parser_state->m_lip.get_cpp_tok_start());
   }
   return false;
 }
@@ -9226,6 +9263,43 @@ bool LEX::call_statement_start(THD *thd, const Lex_ident_sys_st *name1,
 }
 
 
+bool LEX::call_statement_start(THD *thd,
+                               const Lex_ident_sys_st *db,
+                               const Lex_ident_sys_st *pkg,
+                               const Lex_ident_sys_st *proc)
+{
+  Database_qualified_name q_db_pkg(db, pkg);
+  Database_qualified_name q_pkg_proc(pkg, proc);
+  sp_name *spname;
+
+  sql_command= SQLCOM_CALL;
+
+  if (check_db_name(reinterpret_cast<LEX_STRING*>
+                    (const_cast<LEX_CSTRING*>
+                     (static_cast<const LEX_CSTRING*>(db)))))
+  {
+    my_error(ER_WRONG_DB_NAME, MYF(0), db->str);
+    return true;
+  }
+  if (check_routine_name(pkg) ||
+      check_routine_name(proc))
+    return true;
+
+  // Concat `pkg` and `name` to `pkg.name`
+  LEX_CSTRING pkg_dot_proc;
+  if (q_pkg_proc.make_qname(thd->mem_root, &pkg_dot_proc) ||
+      check_ident_length(&pkg_dot_proc) ||
+      !(spname= new (thd->mem_root) sp_name(db, &pkg_dot_proc, true)))
+    return true;
+
+  sp_handler_package_function.add_used_routine(thd->lex, thd, spname);
+  sp_handler_package_body.add_used_routine(thd->lex, thd, &q_db_pkg);
+
+  return !(m_sql_cmd= new (thd->mem_root) Sql_cmd_call(spname,
+                                              &sp_handler_package_procedure));
+}
+
+
 sp_package *LEX::get_sp_package() const
 {
   return sphead ? sphead->get_package() : NULL;
@@ -9500,6 +9574,56 @@ Item *LEX::make_item_func_call_generic(THD *thd, Lex_ident_cli_st *cdb,
 }
 
 
+/*
+  Create a 3-step qualified function call.
+  Currently it's possible for package routines only, e.g.:
+     SELECT db.pkg.func();
+*/
+Item *LEX::make_item_func_call_generic(THD *thd,
+                                       Lex_ident_cli_st *cdb,
+                                       Lex_ident_cli_st *cpkg,
+                                       Lex_ident_cli_st *cfunc,
+                                       List<Item> *args)
+{
+  static Lex_cstring dot(".", 1);
+  Lex_ident_sys db(thd, cdb), pkg(thd, cpkg), func(thd, cfunc);
+  Database_qualified_name q_db_pkg(db, pkg);
+  Database_qualified_name q_pkg_func(pkg, func);
+  sp_name *qname;
+
+  if (db.is_null() || pkg.is_null() || func.is_null())
+    return NULL; // EOM
+
+  if (check_db_name((LEX_STRING*) static_cast<LEX_CSTRING*>(&db)))
+  {
+    my_error(ER_WRONG_DB_NAME, MYF(0), db.str);
+    return NULL;
+  }
+  if (check_routine_name(&pkg) ||
+      check_routine_name(&func))
+    return NULL;
+
+  // Concat `pkg` and `name` to `pkg.name`
+  LEX_CSTRING pkg_dot_func;
+  if (q_pkg_func.make_qname(thd->mem_root, &pkg_dot_func) ||
+      check_ident_length(&pkg_dot_func) ||
+      !(qname= new (thd->mem_root) sp_name(&db, &pkg_dot_func, true)))
+    return NULL;
+
+  sp_handler_package_function.add_used_routine(thd->lex, thd, qname);
+  sp_handler_package_body.add_used_routine(thd->lex, thd, &q_db_pkg);
+
+  thd->lex->safe_to_cache_query= 0;
+
+  if (args && args->elements > 0)
+    return new (thd->mem_root) Item_func_sp(thd, thd->lex->current_context(),
+                                            qname, &sp_handler_package_function,
+                                            *args);
+  return new (thd->mem_root) Item_func_sp(thd, thd->lex->current_context(),
+                                          qname, &sp_handler_package_function);
+}
+
+
 Item *LEX::make_item_func_call_native_or_parse_error(THD *thd,
                                                      Lex_ident_cli_st &name,
                                                      List<Item> *args)
@@ -9522,7 +9646,8 @@ Item *LEX::create_item_qualified_asterisk(THD *thd,
                                              null_clex_str, *name,
                                              star_clex_str)))
     return NULL;
-  current_select->with_wild++;
+  current_select->parsing_place == IN_RETURNING ?
+              thd->lex->returning()->with_wild++ : current_select->with_wild++;
   return item;
 }
 
@@ -9537,7 +9662,8 @@ Item *LEX::create_item_qualified_asterisk(THD *thd,
   if (!(item= new (thd->mem_root) Item_field(thd, current_context(),
                                              schema, *b, star_clex_str)))
    return NULL;
-  current_select->with_wild++;
+  current_select->parsing_place == IN_RETURNING ?
+            thd->lex->returning()->with_wild++ : current_select->with_wild++;
   return item;
 }
 
@@ -9626,6 +9752,7 @@ bool Lex_ident_sys_st::to_size_number(ulonglong *to) const
 }
 
 
+#ifdef WITH_PARTITION_STORAGE_ENGINE
 bool LEX::part_values_current(THD *thd)
 {
   partition_element *elem= part_info->curr_part_elem;
@@ -9633,7 +9760,7 @@ bool LEX::part_values_current(THD *thd)
   {
     if (unlikely(part_info->part_type != VERSIONING_PARTITION))
     {
-      my_error(ER_PARTITION_WRONG_TYPE, MYF(0), "SYSTEM_TIME");
+      part_type_error(thd, NULL, "SYSTEM_TIME", part_info);
       return true;
     }
   }
@@ -9660,7 +9787,7 @@ bool LEX::part_values_history(THD *thd)
   {
     if (unlikely(part_info->part_type != VERSIONING_PARTITION))
     {
-      my_error(ER_PARTITION_WRONG_TYPE, MYF(0), "SYSTEM_TIME");
+      part_type_error(thd, NULL, "SYSTEM_TIME", part_info);
       return true;
     }
   }
@@ -9681,6 +9808,7 @@ bool LEX::part_values_history(THD *thd)
   elem->type= partition_element::HISTORY;
   return false;
 }
+#endif /* WITH_PARTITION_STORAGE_ENGINE */
 
 
 bool LEX::last_field_generated_always_as_row_start_or_end(Lex_ident *p,
@@ -10378,11 +10506,13 @@ void LEX::relink_hack(st_select_lex *select_lex)
 {
   if (!select_stack_top) // Statements of the second type
   {
-    if (!select_lex->get_master()->get_master())
-      ((st_select_lex *) select_lex->get_master())->
-        set_master(&builtin_select);
-    if (!builtin_select.get_slave())
-      builtin_select.set_slave(select_lex->get_master());
+    if (!select_lex->outer_select() &&
+        !builtin_select.first_inner_unit())
+    {
+      builtin_select.register_unit(select_lex->master_unit(),
+                                   &builtin_select.context);
+      builtin_select.add_statistics(select_lex->master_unit());
+    }
   }
 }
 
@@ -10743,9 +10873,8 @@ st_select_lex::build_pushable_cond_for_having_pushdown(THD *thd, Item *cond)
   */
   if (cond->get_extraction_flag() == MARKER_FULL_EXTRACTION)
   {
-    Item *result= cond->transform(thd,
-                                  &Item::multiple_equality_transformer,
-                                  (uchar *)this);
+    Item *result= cond->top_level_transform(thd,
+                        &Item::multiple_equality_transformer, (uchar *)this);
     if (!result)
       return true;
     if (result->type() == Item::COND_ITEM &&

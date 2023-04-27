@@ -1,4 +1,4 @@
-/* Copyright (C) 2013 Codership Oy <info@codership.com>
+/* Copyright (C) 2013-2023 Codership Oy <info@codership.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -18,12 +18,12 @@
 #include "wsrep_trans_observer.h"
 #include "wsrep_high_priority_service.h"
 #include "wsrep_storage_service.h"
+#include "wsrep_server_state.h"
 #include "transaction.h"
 #include "rpl_rli.h"
 #include "log_event.h"
 #include "sql_parse.h"
-#include "mysqld.h"   // start_wsrep_THD();
-#include "wsrep_applier.h"   // start_wsrep_THD();
+#include "wsrep_mysqld.h"   // start_wsrep_THD();
 #include "mysql/service_wsrep.h"
 #include "debug_sync.h"
 #include "slave.h"
@@ -308,32 +308,37 @@ void wsrep_fire_rollbacker(THD *thd)
 }
 
 
-int wsrep_abort_thd(THD *bf_thd_ptr, THD *victim_thd_ptr, my_bool signal)
+int wsrep_abort_thd(THD *bf_thd,
+                    THD *victim_thd,
+                    my_bool signal)
 {
   DBUG_ENTER("wsrep_abort_thd");
-  THD *victim_thd= (THD *) victim_thd_ptr;
-  THD *bf_thd= (THD *) bf_thd_ptr;
 
   mysql_mutex_lock(&victim_thd->LOCK_thd_data);
 
   /* Note that when you use RSU node is desynced from cluster, thus WSREP(thd)
   might not be true.
   */
-  if ((WSREP(bf_thd) ||
+  if ((WSREP_NNULL(bf_thd) ||
        ((WSREP_ON || bf_thd->variables.wsrep_OSU_method == WSREP_OSU_RSU) &&
 	 wsrep_thd_is_toi(bf_thd))) &&
-       victim_thd &&
        !wsrep_thd_is_aborting(victim_thd))
   {
-      WSREP_DEBUG("wsrep_abort_thd, by: %llu, victim: %llu", (bf_thd) ?
-                  (long long)bf_thd->real_id : 0, (long long)victim_thd->real_id);
+      WSREP_DEBUG("wsrep_abort_thd, by: %llu, victim: %llu",
+                  (long long)bf_thd->real_id, (long long)victim_thd->real_id);
       mysql_mutex_unlock(&victim_thd->LOCK_thd_data);
       ha_abort_transaction(bf_thd, victim_thd, signal);
-      mysql_mutex_lock(&victim_thd->LOCK_thd_data);
+      DBUG_RETURN(1);
   }
   else
   {
-    WSREP_DEBUG("wsrep_abort_thd not effective: %p %p", bf_thd, victim_thd);
+    WSREP_DEBUG("wsrep_abort_thd not effective: bf %llu victim %llu "
+                "wsrep %d wsrep_on %d RSU %d TOI %d aborting %d",
+                (long long)bf_thd->real_id, (long long)victim_thd->real_id,
+                WSREP_NNULL(bf_thd), WSREP_ON,
+                bf_thd->variables.wsrep_OSU_method == WSREP_OSU_RSU,
+                wsrep_thd_is_toi(bf_thd),
+                wsrep_thd_is_aborting(victim_thd));
   }
 
   mysql_mutex_unlock(&victim_thd->LOCK_thd_data);
@@ -345,6 +350,7 @@ bool wsrep_bf_abort(THD* bf_thd, THD* victim_thd)
   WSREP_LOG_THD(bf_thd, "BF aborter before");
   WSREP_LOG_THD(victim_thd, "victim before");
 
+#ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("sync.wsrep_bf_abort",
                   {
                     const char act[]=
@@ -354,6 +360,7 @@ bool wsrep_bf_abort(THD* bf_thd, THD* victim_thd)
                     DBUG_ASSERT(!debug_sync_set_action(bf_thd,
                                                        STRING_WITH_LEN(act)));
                   };);
+#endif
 
   if (WSREP(victim_thd) && !victim_thd->wsrep_trx().active())
   {
@@ -373,6 +380,14 @@ bool wsrep_bf_abort(THD* bf_thd, THD* victim_thd)
        have acquired MDL locks (due to DDL execution), and this has caused BF conflict.
        such case does not require aborting in wsrep or replication provider state.
     */
+    if (victim_thd->current_backup_stage != BACKUP_FINISHED &&
+        wsrep_check_mode(WSREP_MODE_BF_MARIABACKUP))
+    {
+      WSREP_DEBUG("killing connection for non wsrep session");
+      mysql_mutex_lock(&victim_thd->LOCK_thd_data);
+      victim_thd->awake_no_mutex(KILL_CONNECTION);
+      mysql_mutex_unlock(&victim_thd->LOCK_thd_data);
+    }
     return false;
   }
 

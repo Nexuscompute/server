@@ -199,6 +199,87 @@ public:
   LEX_CSTRING collation_specific_name() const;
   bool encoding_allows_reinterpret_as(CHARSET_INFO *cs) const;
   bool eq_collation_specific_names(CHARSET_INFO *cs) const;
+  bool can_have_collate_clause() const
+  {
+    return m_charset != &my_charset_bin;
+  }
+
+  /*
+    The MariaDB version when the last collation change happened,
+    e.g. due to a bug fix. See functions below.
+  */
+  static ulong latest_mariadb_version_with_collation_change()
+  {
+    return 110002;
+  }
+
+  /*
+    Check if the collation with the given ID changed its order
+    since the given MariaDB version.
+  */
+  static bool collation_changed_order(ulong mysql_version, uint cs_number)
+  {
+    if ((mysql_version < 50048 &&
+           (cs_number == 11 || /* ascii_general_ci - bug #29499, bug #27562 */
+            cs_number == 41 || /* latin7_general_ci - bug #29461 */
+            cs_number == 42 || /* latin7_general_cs - bug #29461 */
+            cs_number == 20 || /* latin7_estonian_cs - bug #29461 */
+            cs_number == 21 || /* latin2_hungarian_ci - bug #29461 */
+            cs_number == 22 || /* koi8u_general_ci - bug #29461 */
+            cs_number == 23 || /* cp1251_ukrainian_ci - bug #29461 */
+            cs_number == 26)) || /* cp1250_general_ci - bug #29461 */
+           (mysql_version < 50124 &&
+           (cs_number == 33 || /* utf8mb3_general_ci - bug #27877 */
+            cs_number == 35))) /* ucs2_general_ci - bug #27877 */
+        return true;
+
+    if (cs_number == 159 && /* ucs2_general_mysql500_ci - MDEV-30746 */
+        ((mysql_version >= 100400 && mysql_version < 100429) ||
+         (mysql_version >= 100500 && mysql_version < 100520) ||
+         (mysql_version >= 100600 && mysql_version < 100613) ||
+         (mysql_version >= 100700 && mysql_version < 100708) ||
+         (mysql_version >= 100800 && mysql_version < 100808) ||
+         (mysql_version >= 100900 && mysql_version < 100906) ||
+         (mysql_version >= 101000 && mysql_version < 101004) ||
+         (mysql_version >= 101100 && mysql_version < 101103) ||
+         (mysql_version >= 110000 && mysql_version < 110002)))
+      return true;
+    return false;
+  }
+
+  /**
+     Check if a collation has changed ID since the given version.
+     Return the new ID.
+
+     @param mysql_version
+     @param cs_number     - collation ID
+
+     @retval the new collation ID (or cs_number, if no change)
+  */
+
+  static uint upgrade_collation_id(ulong mysql_version, uint cs_number)
+  {
+    if (mysql_version >= 50300 && mysql_version <= 50399)
+    {
+      switch (cs_number) {
+      case 149: return MY_PAGE2_COLLATION_ID_UCS2;   // ucs2_crotian_ci
+      case 213: return MY_PAGE2_COLLATION_ID_UTF8;   // utf8_crotian_ci
+      }
+    }
+    if ((mysql_version >= 50500 && mysql_version <= 50599) ||
+        (mysql_version >= 100000 && mysql_version <= 100005))
+    {
+      switch (cs_number) {
+      case 149: return MY_PAGE2_COLLATION_ID_UCS2;   // ucs2_crotian_ci
+      case 213: return MY_PAGE2_COLLATION_ID_UTF8;   // utf8_crotian_ci
+      case 214: return MY_PAGE2_COLLATION_ID_UTF32;  // utf32_croatian_ci
+      case 215: return MY_PAGE2_COLLATION_ID_UTF16;  // utf16_croatian_ci
+      case 245: return MY_PAGE2_COLLATION_ID_UTF8MB4;// utf8mb4_croatian_ci
+      }
+    }
+    return cs_number;
+  }
+
 };
 
 
@@ -326,6 +407,7 @@ public:
 
   // Returns offset to substring or -1
   int strstr(const Binary_string &search, uint32 offset=0);
+  int strstr(const char *search, uint32 search_length, uint32 offset=0);
   // Returns offset to substring or -1
   int strrstr(const Binary_string &search, uint32 offset=0);
 
@@ -395,6 +477,7 @@ public:
   }
   void qs_append(const char *str, size_t len);
   void qs_append_hex(const char *str, uint32 len);
+  void qs_append_hex_uint32(uint32 num);
   void qs_append(double d);
   void qs_append(const double *d);
   inline void qs_append(const char c)
@@ -610,7 +693,13 @@ public:
     }
     return false;
   }
-
+  bool append_hex_uint32(uint32 num)
+  {
+    if (reserve(8))
+      return true;
+    qs_append_hex_uint32(num);
+    return false;
+  }
   bool append_with_step(const char *s, uint32 arg_length, uint32 step_alloc)
   {
     uint32 new_length= arg_length + str_length;
@@ -695,7 +784,7 @@ public:
 
       Note that if arg_length == Alloced_length then we don't allocate.
       This ensures we don't do any extra allocations in protocol and String:int,
-      but the string will not be atomically null terminated if c_ptr() is not
+      but the string will not be automatically null terminated if c_ptr() is not
       called.
     */
     if (arg_length <= Alloced_length && Alloced_length)
@@ -792,7 +881,7 @@ public:
 class String: public Charset, public Binary_string
 {
 public:
-  String() { }
+  String() = default;
   String(size_t length_arg) :Binary_string(length_arg)
   { }
   /*
@@ -806,9 +895,7 @@ public:
   String(char *str, size_t len, CHARSET_INFO *cs)
    :Charset(cs), Binary_string(str, len)
   { }
-  String(const String &str)
-   :Charset(str), Binary_string(str)
-  { }
+  String(const String &str) = default;
 
   void set(String &str,size_t offset,size_t arg_length)
   {
@@ -983,6 +1070,17 @@ public:
   {
     return append(&ls);
   }
+  bool append_name_value(const LEX_CSTRING &name,
+                         const LEX_CSTRING &value,
+                         uchar quot= '\0')
+  {
+    return
+      append(name) ||
+      append('=') ||
+      (quot && append(quot)) ||
+      append(value) ||
+      (quot && append(quot));
+  }
   bool append(const char *s, size_t size);
   bool append_with_prefill(const char *s, uint32 arg_length,
 			   uint32 full_length, char fill_char);
@@ -993,6 +1091,37 @@ public:
   bool append(const LEX_CSTRING &s, CHARSET_INFO *cs)
   {
     return append(s.str, s.length, cs);
+  }
+
+  /*
+    Append a bitmask in an uint32 with a translation into a
+    C-style human readable representation, e.g.:
+      0x05 -> "(flag04|flag01)"
+
+    @param flags  - the flags to translate
+    @param names  - an array of flag names
+    @param count  - the number of available elements in "names"
+  */
+  bool append_flag32_names(uint32 flags, LEX_CSTRING names[], size_t count)
+  {
+    bool added= false;
+    if (flags && append('('))
+      return true;
+    for (ulong i= 0; i <= 31; i++)
+    {
+      ulong bit= 31 - i;
+      if (flags & (1 << bit))
+      {
+        if (added && append('|'))
+          return true;
+        if (bit < count ? append(names[bit]) : append('?'))
+          return true;
+        added= true;
+      }
+    }
+    if (flags && append(')'))
+      return true;
+    return false;
   }
 
   void strip_sp();

@@ -42,6 +42,9 @@ The following specify which files/extra groups are read (specified before remain
  full' errors. No longer needed, as the server now handles
  this automatically.
  --bind-address=name IP address to bind to.
+ --binlog-alter-two-phase 
+ When set, split ALTER at binary logging into 2
+ statements: START ALTER and COMMIT/ROLLBACK ALTER
  --binlog-annotate-row-events 
  Tells the master to annotate RBR events with the
  statement that caused these events
@@ -360,7 +363,9 @@ The following specify which files/extra groups are read (specified before remain
  --gtid-strict-mode  Enforce strict seq_no ordering of events in the binary
  log. Slave stops with an error if it encounters an event
  that would cause it to generate an out-of-order binlog if
- executed.
+ executed. When ON the same server-id semisync-replicated
+ transactions that duplicate exising ones in binlog are
+ ignored without error and slave interruption.
  -?, --help          Display this help and exit.
  --histogram-size=#  Number of bytes used for a histogram. If set to 0, no
  histograms are created by ANALYZE.
@@ -503,6 +508,7 @@ The following specify which files/extra groups are read (specified before remain
  administrative statements to the slow log if it is open. 
  Resets or sets the option 'admin' in
  log_slow_disabled_statements
+ (Defaults to on; use --skip-log-slow-admin-statements to disable.)
  --log-slow-disabled-statements=name 
  Don't log certain types of statements to slow log. Any
  combination of: admin, call, slave, sp
@@ -523,6 +529,7 @@ The following specify which files/extra groups are read (specified before remain
  Log slow statements executed by slave thread to the slow
  log if it is open. Resets or sets the option 'slave' in
  log_slow_disabled_statements
+ (Defaults to on; use --skip-log-slow-slave-statements to disable.)
  --log-slow-verbosity=name 
  Verbosity level for the slow log. Any combination of: 
  innodb, query_plan, explain
@@ -1476,6 +1483,7 @@ automatic-sp-privileges TRUE
 back-log 80
 big-tables FALSE
 bind-address (No default value)
+binlog-alter-two-phase FALSE
 binlog-annotate-row-events TRUE
 binlog-cache-size 32768
 binlog-checksum CRC32

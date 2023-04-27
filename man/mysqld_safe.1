@@ -1,6 +1,6 @@
 '\" t
 .\"
-.TH "\FBMYSQLD_SAFE\FR" "1" "15 May 2020" "MariaDB 10\&.6" "MariaDB Database System"
+.TH "\FBMARIADBD-SAFE\FR" "1" "15 May 2020" "MariaDB 10\&.8" "MariaDB Database System"
 .\" -----------------------------------------------------------------
 .\" * set default formatting
 .\" -----------------------------------------------------------------
@@ -15,7 +15,7 @@
 .\" tools: mysqld_safe
 .\" scripts
 .SH "NAME"
-mysqld_safe \- MariaDB server startup script
+mariadbd-safe \- MariaDB server startup script (mysqld_safe is now a symlink to mariadbd-safe)
 .SH "SYNOPSIS"
 .HP \w'\fBmysqld_safe\ \fR\fB\fIoptions\fR\fR\ 'u
 \fBmysqld_safe \fR\fB\fIoptions\fR\fR
@@ -340,7 +340,9 @@ program to set the server\'s scheduling priority to the given value\&.
 .\}
 .\" mysqld_safe: no-auto-restart option
 .\" no-auto-restart option: mysqld_safe
-\fB\-\-no\-auto\-restart\fR
+\fB\-\-no\-auto\-restart\fR,
+\fB\-\-nowatch\fR,
+\fB\-\-no\-watch\fR
 .sp
 Exit after starting mysqld\&.
 .RE
@@ -358,21 +360,6 @@ Exit after starting mysqld\&.
 \fB\-\-no\-defaults\fR
 .sp
 Do not read any option files\&. This must be the first option on the command line if it is used\&.
-.RE
-.sp
-.RS 4
-.ie n \{\
-\h'-04'\(bu\h'+03'\c
-.\}
-.el \{\
-.sp -1
-.IP \(bu 2.3
-.\}
-.\" mysqld_safe: no-watch option
-.\" no-watch option: mysqld_safe
-\fB\-\-no\-auto\-restart\fR
-.sp
-Exit after starting mysqld\&.
 .RE
 .sp
 .RS 4

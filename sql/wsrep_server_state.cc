@@ -43,13 +43,12 @@ Wsrep_server_state::Wsrep_server_state(const std::string& name,
                         initial_position,
                         max_protocol_version,
                         wsrep::server_state::rm_sync)
-  , m_mutex(LOCK_wsrep_server_state)
-  , m_cond(COND_wsrep_server_state)
+  , m_mutex(&LOCK_wsrep_server_state)
+  , m_cond(&COND_wsrep_server_state)
   , m_service(*this)
 { }
 
-Wsrep_server_state::~Wsrep_server_state()
-{ }
+Wsrep_server_state::~Wsrep_server_state() = default;
 
 void Wsrep_server_state::init_once(const std::string& name,
                                    const std::string& incoming_address,

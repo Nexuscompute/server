@@ -2,7 +2,7 @@
 #define SQL_ITEM_INCLUDED
 
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2021, MariaDB Corporation.
+   Copyright (c) 2009, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -214,7 +214,7 @@ struct Name_resolution_context: Sql_alloc
     The name resolution context to search in when an Item cannot be
     resolved in this context (the context of an outer select)
   */
-  Name_resolution_context *outer_context;
+  Name_resolution_context *outer_context= nullptr;
 
   /*
     List of tables used to resolve the items of this context.  Usually these
@@ -224,7 +224,7 @@ struct Name_resolution_context: Sql_alloc
     statements we have to change this member dynamically to ensure correct
     name resolution of different parts of the statement.
   */
-  TABLE_LIST *table_list;
+  TABLE_LIST *table_list= nullptr;
   /*
     In most cases the two table references below replace 'table_list' above
     for the purpose of name resolution. The first and last name resolution
@@ -232,62 +232,65 @@ struct Name_resolution_context: Sql_alloc
     join tree in a FROM clause. This is needed for NATURAL JOIN, JOIN ... USING
     and JOIN ... ON. 
   */
-  TABLE_LIST *first_name_resolution_table;
+  TABLE_LIST *first_name_resolution_table= nullptr;
   /*
     Last table to search in the list of leaf table references that begins
     with first_name_resolution_table.
   */
-  TABLE_LIST *last_name_resolution_table;
+  TABLE_LIST *last_name_resolution_table= nullptr;
 
   /* Cache first_name_resolution_table in setup_natural_join_row_types */
-  TABLE_LIST *natural_join_first_table;
+  TABLE_LIST *natural_join_first_table= nullptr;
   /*
     SELECT_LEX item belong to, in case of merged VIEW it can differ from
     SELECT_LEX where item was created, so we can't use table_list/field_list
     from there
   */
-  st_select_lex *select_lex;
+  st_select_lex *select_lex= nullptr;
 
   /*
     Processor of errors caused during Item name resolving, now used only to
     hide underlying tables in errors about views (i.e. it substitute some
     errors for views)
   */
-  void (*error_processor)(THD *, void *);
-  void *error_processor_data;
+  void (*error_processor)(THD *, void *)= &dummy_error_processor;
+  void *error_processor_data= nullptr;
 
   /*
     When TRUE items are resolved in this context both against the
     SELECT list and this->table_list. If FALSE, items are resolved
     only against this->table_list.
   */
-  bool resolve_in_select_list;
+  bool resolve_in_select_list= false;
 
   /*
     Bitmap of tables that should be ignored when doing name resolution.
     Normally it is {0}. Non-zero values are used by table functions.
   */
-  ignored_tables_list_t ignored_tables;
+  ignored_tables_list_t ignored_tables= nullptr;
 
   /*
     Security context of this name resolution context. It's used for views
     and is non-zero only if the view is defined with SQL SECURITY DEFINER.
   */
-  Security_context *security_ctx;
+  Security_context *security_ctx= nullptr;
 
-  Name_resolution_context()
-    :outer_context(0), table_list(0), select_lex(0),
-    error_processor_data(0),
-    ignored_tables(NULL),
-    security_ctx(0)
-    {}
+  Name_resolution_context() = default;
+
+  /**
+    Name resolution context with resolution in only one table
+  */
+  Name_resolution_context(TABLE_LIST *table) :
+    first_name_resolution_table(table), last_name_resolution_table(table)
+  {}
 
   void init()
   {
     resolve_in_select_list= FALSE;
     error_processor= &dummy_error_processor;
-    first_name_resolution_table= NULL;
-    last_name_resolution_table= NULL;
+    ignored_tables= nullptr;
+    first_name_resolution_table= nullptr;
+    last_name_resolution_table= nullptr;
   }
 
   void resolve_in_table_list_only(TABLE_LIST *tables)
@@ -323,7 +326,7 @@ private:
   TABLE_LIST *save_next_local;
 
 public:
-  Name_resolution_context_state() {}          /* Remove gcc warning */
+  Name_resolution_context_state() = default;          /* Remove gcc warning */
 
 public:
   /* Save the state of a name resolution context. */
@@ -424,7 +427,7 @@ class sp_rcontext;
 class Sp_rcontext_handler
 {
 public:
-  virtual ~Sp_rcontext_handler() {}
+  virtual ~Sp_rcontext_handler() = default;
   /**
     A prefix used for SP variable names in queries:
     - EXPLAIN EXTENDED
@@ -497,8 +500,8 @@ public:
                   required, otherwise we only reading it and SELECT
                   privilege might be required.
   */
-  Settable_routine_parameter() {}
-  virtual ~Settable_routine_parameter() {}
+  Settable_routine_parameter() = default;
+  virtual ~Settable_routine_parameter() = default;
   virtual void set_required_privilege(bool rw) {};
 
   /*
@@ -580,7 +583,7 @@ class Rewritable_query_parameter
       limit_clause_param(false)
   { }
 
-  virtual ~Rewritable_query_parameter() { }
+  virtual ~Rewritable_query_parameter() = default;
 
   virtual bool append_for_log(THD *thd, String *str) = 0;
 };
@@ -740,7 +743,7 @@ public:
 class Item_const
 {
 public:
-  virtual ~Item_const() {}
+  virtual ~Item_const() = default;
   virtual const Type_all_attributes *get_type_all_attributes_from_const() const= 0;
   virtual bool const_is_null() const { return false; }
   virtual const longlong *const_ptr_longlong() const { return NULL; }
@@ -1143,6 +1146,11 @@ public:
   {
     return fixed() ? false : fix_fields(thd, ref);
   }
+
+  /*
+   fix_fields_if_needed_for_scalar() is used where we need to filter items
+   that can't be scalars and want to return error for it.
+  */
   bool fix_fields_if_needed_for_scalar(THD *thd, Item **ref)
   {
     return fix_fields_if_needed(thd, ref) || check_cols(1);
@@ -1491,6 +1499,12 @@ public:
   */
   inline ulonglong val_uint() { return (ulonglong) val_int(); }
 
+  virtual bool hash_not_null(Hasher *hasher)
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
+
   /*
     Return string representation of this item object.
 
@@ -1838,6 +1852,16 @@ public:
   */
   virtual bool is_evaluable_expression() const { return true; }
 
+  virtual bool check_assignability_to(const Field *to, bool ignore) const
+  {
+    /*
+      "this" must be neither DEFAULT/IGNORE,
+      nor Item_param bound to DEFAULT/IGNORE.
+    */
+    DBUG_ASSERT(is_evaluable_expression());
+    return to->check_assignability_from(type_handler(), ignore);
+  }
+
   /**
    * Check whether the item is a parameter  ('?') of stored routine.
    * Default implementation returns false. Method is overridden in the class
@@ -2064,7 +2088,6 @@ public:
     table during query processing (grouping and so on)
   */
   virtual bool is_result_field() { return 0; }
-  virtual bool is_json_type() { return false; }
   virtual bool is_bool_literal() const { return false; }
   /* This is to handle printing of default values */
   virtual bool need_parentheses_in_default() { return false; }
@@ -2086,6 +2109,7 @@ public:
   virtual Item *copy_or_same(THD *thd) { return this; }
   virtual Item *copy_andor_structure(THD *thd) { return this; }
   virtual Item *real_item() { return this; }
+  const Item *real_item() const { return const_cast<Item*>(this)->real_item(); }
   virtual Item *get_tmp_table_item(THD *thd) { return copy_or_same(thd); }
   virtual Item *make_odbc_literal(THD *thd, const LEX_CSTRING *typestr)
   {
@@ -2105,6 +2129,11 @@ public:
   }
 
   virtual Item* transform(THD *thd, Item_transformer transformer, uchar *arg);
+  virtual Item* top_level_transform(THD *thd, Item_transformer transformer,
+                                    uchar *arg)
+  {
+    return transform(thd, transformer, arg);
+  }
 
   /*
     This function performs a generic "compilation" of the Item tree.
@@ -2128,6 +2157,11 @@ public:
     if ((this->*analyzer) (arg_p))
       return ((this->*transformer) (thd, arg_t));
     return 0;
+  }
+  virtual Item* top_level_compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
+                                  Item_transformer transformer, uchar *arg_t)
+  {
+    return compile(thd, analyzer, arg_p, transformer, arg_t);
   }
 
    virtual void traverse_cond(Cond_traverser traverser,
@@ -2164,7 +2198,6 @@ public:
   virtual bool enumerate_field_refs_processor(void *arg) { return 0; }
   virtual bool mark_as_eliminated_processor(void *arg) { return 0; }
   virtual bool eliminate_subselect_processor(void *arg) { return 0; }
-  virtual bool set_fake_select_as_master_processor(void *arg) { return 0; }
   virtual bool view_used_tables_processor(void *arg) { return 0; }
   virtual bool eval_not_null_tables(void *arg) { return 0; }
   virtual bool is_subquery_processor(void *arg) { return 0; }
@@ -2175,6 +2208,12 @@ public:
   virtual bool cleanup_is_expensive_cache_processor(void *arg)
   {
     is_expensive_cache= (int8)(-1);
+    return 0;
+  }
+
+  virtual bool set_extraction_flag_processor(void *arg)
+  {
+    set_extraction_flag(*(int16*)arg);
     return 0;
   }
 
@@ -2469,6 +2508,8 @@ public:
   { return this; }
   virtual Item *in_predicate_to_in_subs_transformer(THD *thd, uchar *arg)
   { return this; }
+  virtual Item *in_predicate_to_equality_transformer(THD *thd, uchar *arg)
+  { return this; }
   virtual Item *field_transformer_for_having_pushdown(THD *thd, uchar *arg)
   { return this; }
   virtual Item *multiple_equality_transformer(THD *thd, uchar *arg)
@@ -2646,18 +2687,27 @@ public:
   void register_in(THD *thd);	 
   
   bool depends_only_on(table_map view_map) 
-  { return marker & MARKER_FULL_EXTRACTION; }
-  int get_extraction_flag() const
-  { return marker & MARKER_EXTRACTION_MASK; }
+  { return get_extraction_flag() & MARKER_FULL_EXTRACTION; }
+   int get_extraction_flag() const
+  {
+    if (basic_const_item())
+      return MARKER_FULL_EXTRACTION;
+    else
+      return marker & MARKER_EXTRACTION_MASK;
+  }
   void set_extraction_flag(int16 flags)
   {
-    marker &= ~MARKER_EXTRACTION_MASK;
-    marker|= flags;
+    if (!basic_const_item())
+    {
+      marker= marker & ~MARKER_EXTRACTION_MASK;
+      marker|= flags;
+    }
   }
   void clear_extraction_flag()
   {
-    marker &= ~MARKER_EXTRACTION_MASK;
-  }
+    if (!basic_const_item())
+      marker= marker & ~MARKER_EXTRACTION_MASK;
+   }
   void check_pushable_cond(Pushdown_checker excl_dep_func, uchar *arg);
   bool pushable_cond_checker_for_derived(uchar *arg)
   {
@@ -2881,8 +2931,8 @@ class Field_enumerator
 {
 public:
   virtual void visit_field(Item_field *field)= 0;
-  virtual ~Field_enumerator() {};             /* purecov: inspected */
-  Field_enumerator() {}                       /* Remove gcc warning */
+  virtual ~Field_enumerator() = default;;             /* purecov: inspected */
+  Field_enumerator() = default;                       /* Remove gcc warning */
 };
 
 class Item_string;
@@ -3414,7 +3464,7 @@ public:
   Item_result_field(THD *thd, Item_result_field *item):
     Item_fixed_hybrid(thd, item), result_field(item->result_field)
   {}
-  ~Item_result_field() {}			/* Required with gcc 2.95 */
+  ~Item_result_field() = default;
   Field *get_tmp_table_field() override { return result_field; }
   Field *create_tmp_field_ex(MEM_ROOT *root, TABLE *table, Tmp_field_src *src,
                              const Tmp_field_param *param) override
@@ -3486,6 +3536,10 @@ public:
     this variable.
   */
   bool can_be_depended;
+  /*
+     NOTE: came from TABLE::alias_name_used and this is only a hint!
+     See comment for TABLE::alias_name_used.
+  */
   bool alias_name_used; /* true if item was resolved against alias */
 
   Item_ident(THD *thd, Name_resolution_context *context_arg,
@@ -3504,7 +3558,6 @@ public:
     Collect outer references
   */
   bool collect_outer_ref_processor(void *arg) override;
-  Item *derived_field_transformer_for_having(THD *thd, uchar *arg) override;
   friend bool insert_fields(THD *thd, Name_resolution_context *context,
                             const char *db_name,
                             const char *table_name, List_iterator<Item> *it,
@@ -3568,7 +3621,6 @@ public:
   my_decimal *val_decimal_result(my_decimal *) override;
   bool val_bool_result() override;
   bool is_null_result() override;
-  bool is_json_type() override;
   bool send(Protocol *protocol, st_value *buffer) override;
   Load_data_outvar *get_load_data_outvar() override { return this; }
   bool load_data_set_null(THD *thd, const Load_data_param *param) override
@@ -3627,6 +3679,13 @@ public:
   Sql_mode_dependency value_depends_on_sql_mode() const override
   {
     return Sql_mode_dependency(0, field->value_depends_on_sql_mode());
+  }
+  bool hash_not_null(Hasher *hasher) override
+  {
+    if (field->is_null())
+      return true;
+    field->hash_not_null(hasher);
+    return false;
   }
   longlong val_int_endpoint(bool left_endp, bool *incl_endp) override;
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate) override;
@@ -4084,6 +4143,7 @@ class Item_param :public Item_basic_value,
   const String *value_query_val_str(THD *thd, String* str) const;
   Item *value_clone_item(THD *thd);
   bool is_evaluable_expression() const override;
+  bool check_assignability_to(const Field *field, bool ignore) const override;
   bool can_return_value() const;
 
 public:
@@ -4977,6 +5037,7 @@ class Item_bin_string: public Item_hex_hybrid
 {
 public:
   Item_bin_string(THD *thd, const char *str, size_t str_length);
+  void print(String *str, enum_query_type query_type) override;
 };
 
 
@@ -5495,7 +5556,7 @@ public:
   Field *sp_result_field;
   Item_sp(THD *thd, Name_resolution_context *context_arg, sp_name *name_arg);
   Item_sp(THD *thd, Item_sp *item);
-  LEX_CSTRING func_name_cstring(THD *thd) const;
+  LEX_CSTRING func_name_cstring(THD *thd, bool is_package_function) const;
   void cleanup();
   bool sp_check_access(THD *thd);
   bool execute(THD *thd, bool *null_value, Item **args, uint arg_count);
@@ -5555,7 +5616,7 @@ public:
   { return ref ? (*ref)->type() : REF_ITEM; }
   bool eq(const Item *item, bool binary_cmp) const override
   {
-    Item *it= ((Item *) item)->real_item();
+    const Item *it= item->real_item();
     return ref && (*ref)->eq(it, binary_cmp);
   }
   void save_val(Field *to) override;
@@ -5639,7 +5700,6 @@ public:
   {
     return ref ? (*ref)->get_typelib() : NULL;
   }
-  bool is_json_type() override { return (*ref)->is_json_type(); }
 
   bool walk(Item_processor processor, bool walk_subquery, void *arg) override
   {
@@ -5912,7 +5972,7 @@ public:
   { orig_item->make_send_field(thd, field); }
   bool eq(const Item *item, bool binary_cmp) const override
   {
-    Item *it= const_cast<Item*>(item)->real_item();
+    const Item *it= item->real_item();
     return orig_item->eq(it, binary_cmp);
   }
   void fix_after_pullout(st_select_lex *new_parent, Item **refptr, bool merge)
@@ -6156,6 +6216,14 @@ public:
       result_field->set_null();
     else
       Item_direct_ref::save_in_result_field(no_conversions);
+  }
+
+  int save_in_field(Field *field, bool no_conversions) override
+  {
+    if (check_null_ref())
+      return set_field_to_null_with_conversions(field, no_conversions);
+
+    return Item_direct_ref::save_in_field(field, no_conversions);
   }
 
   void cleanup() override
@@ -6626,7 +6694,6 @@ class Item_default_value : public Item_field
   void calculate();
 public:
   Item *arg= nullptr;
-  Field *cached_field= nullptr;
   Item_default_value(THD *thd, Name_resolution_context *context_arg, Item *a,
                      bool vcol_assignment_arg)
     : Item_field(thd, context_arg),
@@ -6643,6 +6710,10 @@ public:
   bool get_date(THD *thd, MYSQL_TIME *ltime,date_mode_t fuzzydate) override;
   bool val_native(THD *thd, Native *to) override;
   bool val_native_result(THD *thd, Native *to) override;
+  longlong val_datetime_packed(THD *thd) override
+  { return Item::val_datetime_packed(thd); }
+  longlong val_time_packed(THD *thd) override
+  { return Item::val_time_packed(thd); }
 
   /* Result variants */
   double val_result() override;
@@ -6656,6 +6727,7 @@ public:
 
   bool send(Protocol *protocol, st_value *buffer) override;
   int save_in_field(Field *field_arg, bool no_conversions) override;
+  void save_in_result_field(bool no_conversions) override;
   bool save_in_param(THD *, Item_param *param) override
   {
     // It should not be possible to have "EXECUTE .. USING DEFAULT(a)"
@@ -6671,11 +6743,12 @@ public:
   }
   bool vcol_assignment_allowed_value() const override
   { return vcol_assignment_ok; }
-  Field *get_tmp_table_field() override { return nullptr; }
   Item *get_tmp_table_item(THD *) override { return this; }
   Item_field *field_for_view_update() override { return nullptr; }
   bool update_vcol_processor(void *) override { return false; }
+  bool check_field_expression_processor(void *arg) override;
   bool check_func_default_processor(void *) override { return true; }
+  bool register_field_in_read_map(void *arg) override;
   bool walk(Item_processor processor, bool walk_subquery, void *args) override
   {
     return (arg && arg->walk(processor, walk_subquery, args)) ||
@@ -6760,6 +6833,10 @@ public:
   {
     str->append(STRING_WITH_LEN("default"));
   }
+  bool check_assignability_to(const Field *to, bool ignore) const override
+  {
+    return false;
+  }
   int save_in_field(Field *field_arg, bool) override
   {
     return field_arg->save_in_field_default_value(false);
@@ -6792,6 +6869,10 @@ public:
   void print(String *str, enum_query_type) override
   {
     str->append(STRING_WITH_LEN("ignore"));
+  }
+  bool check_assignability_to(const Field *to, bool ignore) const override
+  {
+    return false;
   }
   int save_in_field(Field *field_arg, bool) override
   {
@@ -6954,7 +7035,7 @@ public:
   for any value.
 */
 
-class Item_cache: public Item,
+class Item_cache: public Item_fixed_hybrid,
                   public Type_handler_hybrid_field_type
 {
 protected:
@@ -6985,7 +7066,7 @@ public:
   bool null_value_inside;
 
   Item_cache(THD *thd):
-    Item(thd),
+    Item_fixed_hybrid(thd),
     Type_handler_hybrid_field_type(&type_handler_string),
     example(0), cached_field(0),
     value_cached(0),
@@ -6994,10 +7075,11 @@ public:
     set_maybe_null();
     null_value= 1;
     null_value_inside= true;
+    quick_fix_field();
   }
 protected:
   Item_cache(THD *thd, const Type_handler *handler):
-    Item(thd),
+    Item_fixed_hybrid(thd),
     Type_handler_hybrid_field_type(handler),
     example(0), cached_field(0),
     value_cached(0),
@@ -7006,6 +7088,7 @@ protected:
     set_maybe_null();
     null_value= 1;
     null_value_inside= true;
+    quick_fix_field();
   }
 
 public:
@@ -7058,10 +7141,17 @@ public:
     }
     return mark_unsupported_function("cache", arg, VCOL_IMPOSSIBLE);
   }
+  bool fix_fields(THD *thd, Item **ref) override
+  {
+    quick_fix_field();
+    if (example && !example->fixed())
+      return example->fix_fields(thd, ref);
+    return 0;
+  }
   void cleanup() override
   {
     clear();
-    Item::cleanup();
+    Item_fixed_hybrid::cleanup();
   }
   /**
      Check if saved item has a non-NULL value.
@@ -7461,7 +7551,7 @@ class Item_cache_row: public Item_cache
   bool save_array;
 public:
   Item_cache_row(THD *thd):
-    Item_cache(thd), values(0), item_count(2),
+    Item_cache(thd, &type_handler_row), values(0), item_count(2),
     save_array(0) {}
 
   /*
@@ -7643,7 +7733,7 @@ public:
   */
   virtual void close()= 0;
 
-  virtual ~Item_iterator() {}
+  virtual ~Item_iterator() = default;
 };
 
 
@@ -7733,6 +7823,104 @@ inline void Virtual_column_info::print(String* str)
 {
   expr->print_for_table_def(str);
 }
+
+class Item_direct_ref_to_item : public Item_direct_ref
+{
+  Item *m_item;
+public:
+  Item_direct_ref_to_item(THD *thd, Item *item);
+
+  void change_item(THD *thd, Item *);
+
+  bool fix_fields(THD *thd, Item **it);
+
+  void print(String *str, enum_query_type query_type);
+
+  Item *safe_charset_converter(THD *thd, CHARSET_INFO *tocs);
+  Item *get_tmp_table_item(THD *thd)
+  { return m_item->get_tmp_table_item(thd); }
+  Item *get_copy(THD *thd)
+  { return m_item->get_copy(thd); }
+  COND *build_equal_items(THD *thd, COND_EQUAL *inherited,
+                          bool link_item_fields,
+                          COND_EQUAL **cond_equal_ref)
+  {
+    return m_item->build_equal_items(thd, inherited, link_item_fields,
+                                     cond_equal_ref);
+  }
+  const char *full_name() const { return m_item->full_name(); }
+  void make_send_field(THD *thd, Send_field *field)
+  { m_item->make_send_field(thd, field); }
+  bool eq(const Item *item, bool binary_cmp) const
+  {
+    const Item *it= item->real_item();
+    return m_item->eq(it, binary_cmp);
+  }
+  void fix_after_pullout(st_select_lex *new_parent, Item **refptr, bool merge)
+  { m_item->fix_after_pullout(new_parent, &m_item, merge); }
+  void save_val(Field *to)
+  { return m_item->save_val(to); }
+  void save_result(Field *to)
+  { return m_item->save_result(to); }
+  int save_in_field(Field *to, bool no_conversions)
+  { return m_item->save_in_field(to, no_conversions); }
+  const Type_handler *type_handler() const { return m_item->type_handler(); }
+  table_map used_tables() const { return m_item->used_tables(); }
+  void update_used_tables()
+  { m_item->update_used_tables(); }
+  bool const_item() const { return m_item->const_item(); }
+  table_map not_null_tables() const { return m_item->not_null_tables(); }
+  bool walk(Item_processor processor, bool walk_subquery, void *arg)
+  {
+    return m_item->walk(processor, walk_subquery, arg) ||
+      (this->*processor)(arg);
+  }
+  bool enumerate_field_refs_processor(void *arg)
+  { return m_item->enumerate_field_refs_processor(arg); }
+  Item_field *field_for_view_update()
+  { return m_item->field_for_view_update(); }
+
+  /* Row emulation: forwarding of ROW-related calls to orig_item */
+  uint cols() const
+  { return m_item->cols(); }
+  Item* element_index(uint i)
+  { return this; }
+  Item** addr(uint i)
+  { return  &m_item; }
+  bool check_cols(uint c)
+  { return Item::check_cols(c); }
+  bool null_inside()
+  { return m_item->null_inside(); }
+  void bring_value()
+  {}
+
+  Item_equal *get_item_equal() { return m_item->get_item_equal(); }
+  void set_item_equal(Item_equal *item_eq) { m_item->set_item_equal(item_eq); }
+  Item_equal *find_item_equal(COND_EQUAL *cond_equal)
+  { return m_item->find_item_equal(cond_equal); }
+  Item *propagate_equal_fields(THD *thd, const Context &ctx, COND_EQUAL *cond)
+  { return m_item->propagate_equal_fields(thd, ctx, cond); }
+  Item *replace_equal_field(THD *thd, uchar *arg)
+  { return m_item->replace_equal_field(thd, arg); }
+
+  bool excl_dep_on_table(table_map tab_map)
+  { return m_item->excl_dep_on_table(tab_map); }
+  bool excl_dep_on_grouping_fields(st_select_lex *sel)
+  { return m_item->excl_dep_on_grouping_fields(sel); }
+  bool is_expensive() { return m_item->is_expensive(); }
+  Item* build_clone(THD *thd) { return get_copy(thd); }
+
+  void split_sum_func(THD *thd, Ref_ptr_array ref_pointer_array,
+                      List<Item> &fields, uint flags)
+  {
+    m_item->split_sum_func(thd, ref_pointer_array, fields, flags);
+  }
+  /*
+    This processor states that this is safe for virtual columns
+    (because this Item transparency)
+  */
+  bool check_vcol_func_processor(void *arg) { return FALSE;}
+};
 
 inline bool TABLE::mark_column_with_deps(Field *field)
 {

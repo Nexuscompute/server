@@ -1,6 +1,6 @@
 /*****************************************************************************
 
-Copyright (c) 2019, 2022, MariaDB Corporation.
+Copyright (c) 2019, 2023, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -23,6 +23,9 @@ Mini-transaction log record encoding and decoding
 
 #pragma once
 #include "mtr0mtr.h"
+
+/** The smallest invalid page identifier for persistent tablespaces */
+constexpr page_id_t end_page_id{SRV_SPACE_ID_UPPER_BOUND, 0};
 
 /** The minimum 2-byte integer (0b10xxxxxx xxxxxxxx) */
 constexpr uint32_t MIN_2BYTE= 1 << 7;
@@ -194,7 +197,7 @@ inline bool mtr_t::write(const buf_block_t &block, void *ptr, V val)
   }
   byte *p= static_cast<byte*>(ptr);
   const byte *const end= p + l;
-  if (w != FORCED && m_log_mode == MTR_LOG_ALL)
+  if (w != FORCED && is_logged())
   {
     const byte *b= buf;
     while (*p++ == *b++)
@@ -222,7 +225,7 @@ inline void mtr_t::memset(const buf_block_t &b, ulint ofs, ulint len, byte val)
 {
   ut_ad(len);
   set_modified(b);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
 
   static_assert(MIN_4BYTE > UNIV_PAGE_SIZE_MAX, "consistency");
@@ -259,7 +262,7 @@ inline void mtr_t::memset(const buf_block_t &b, ulint ofs, size_t len,
   ut_ad(size);
   ut_ad(len > size); /* use mtr_t::memcpy() for shorter writes */
   set_modified(b);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
 
   static_assert(MIN_4BYTE > UNIV_PAGE_SIZE_MAX, "consistency");
@@ -317,7 +320,7 @@ inline void mtr_t::memcpy_low(const buf_block_t &block, uint16_t offset,
 {
   ut_ad(len);
   set_modified(block);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   if (len < mtr_buf_t::MAX_DATA_SIZE - (1 + 3 + 3 + 5 + 5))
   {
@@ -352,7 +355,7 @@ inline void mtr_t::memmove(const buf_block_t &b, ulint d, ulint s, ulint len)
   ut_ad(d + len <= ulint(srv_page_size));
 
   set_modified(b);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   static_assert(MIN_4BYTE > UNIV_PAGE_SIZE_MAX, "consistency");
   size_t lenlen= (len < MIN_2BYTE ? 1 : len < MIN_3BYTE ? 2 : 3);
@@ -385,10 +388,11 @@ template<byte type>
 inline byte *mtr_t::log_write(const page_id_t id, const buf_page_t *bpage,
                               size_t len, bool alloc, size_t offset)
 {
-  static_assert(!(type & 15) && type != RESERVED && type != OPTION &&
+  static_assert(!(type & 15) && type != RESERVED &&
                 type <= FILE_CHECKPOINT, "invalid type");
   ut_ad(type >= FILE_CREATE || is_named_space(id.space()));
   ut_ad(!bpage || bpage->id() == id);
+  ut_ad(id < end_page_id);
   constexpr bool have_len= type != INIT_PAGE && type != FREE_PAGE;
   constexpr bool have_offset= type == WRITE || type == MEMSET ||
     type == MEMMOVE;
@@ -398,7 +402,8 @@ inline byte *mtr_t::log_write(const page_id_t id, const buf_page_t *bpage,
   ut_ad(have_offset || offset == 0);
   ut_ad(offset + len <= srv_page_size);
   static_assert(MIN_4BYTE >= UNIV_PAGE_SIZE_MAX, "consistency");
-
+  ut_ad(type == FREE_PAGE || type == OPTION || (type == EXTENDED && !bpage) ||
+        memo_contains_flagged(bpage, MTR_MEMO_MODIFY));
   size_t max_len;
   if (!have_len)
     max_len= 1 + 5 + 5;
@@ -488,7 +493,7 @@ inline void mtr_t::memcpy(const buf_block_t &b, void *dest, const void *str,
   ut_ad(ut_align_down(dest, srv_page_size) == b.page.frame);
   char *d= static_cast<char*>(dest);
   const char *s= static_cast<const char*>(str);
-  if (w != FORCED && m_log_mode == MTR_LOG_ALL)
+  if (w != FORCED && is_logged())
   {
     ut_ad(len);
     const char *const end= d + len;
@@ -508,55 +513,13 @@ inline void mtr_t::memcpy(const buf_block_t &b, void *dest, const void *str,
   memcpy(b, ut_align_offset(d, srv_page_size), len);
 }
 
-/** Initialize an entire page.
-@param[in,out]        b       buffer page */
-inline void mtr_t::init(buf_block_t *b)
-{
-  const page_id_t id{b->page.id()};
-  ut_ad(is_named_space(id.space()));
-  ut_ad(!m_freed_pages == !m_freed_space);
-
-  if (UNIV_LIKELY_NULL(m_freed_space) &&
-      m_freed_space->id == id.space() &&
-      m_freed_pages->remove_if_exists(b->page.id().page_no()) &&
-      m_freed_pages->empty())
-  {
-    delete m_freed_pages;
-    m_freed_pages= nullptr;
-    m_freed_space= nullptr;
-  }
-
-  b->page.set_reinit(b->page.state() & buf_page_t::LRU_MASK);
-
-  if (m_log_mode != MTR_LOG_ALL)
-  {
-    ut_ad(m_log_mode == MTR_LOG_NONE || m_log_mode == MTR_LOG_NO_REDO);
-    return;
-  }
-
-  m_log.close(log_write<INIT_PAGE>(b->page.id(), &b->page));
-  m_last_offset= FIL_PAGE_TYPE;
-}
-
-/** Free a page.
-@param[in]	space 	tablespace contains page to be freed
-@param[in]	offset	page offset to be freed */
-inline void mtr_t::free(fil_space_t &space, uint32_t offset)
-{
-  ut_ad(is_named_space(&space));
-  ut_ad(!m_freed_space || m_freed_space == &space);
-
-  if (m_log_mode == MTR_LOG_ALL)
-    m_log.close(log_write<FREE_PAGE>({space.id, offset}, nullptr));
-}
-
 /** Write an EXTENDED log record.
 @param block  buffer pool page
 @param type   extended record subtype; @see mrec_ext_t */
 inline void mtr_t::log_write_extended(const buf_block_t &block, byte type)
 {
   set_modified(block);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   byte *l= log_write<EXTENDED>(block.page.id(), &block.page, 1, true);
   *l++= type;
@@ -583,7 +546,7 @@ inline void mtr_t::page_delete(const buf_block_t &block, ulint prev_rec)
   ut_ad(!block.zip_size());
   ut_ad(prev_rec < block.physical_size());
   set_modified(block);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   size_t len= (prev_rec < MIN_2BYTE ? 2 : prev_rec < MIN_3BYTE ? 3 : 4);
   byte *l= log_write<EXTENDED>(block.page.id(), &block.page, len, true);
@@ -610,7 +573,7 @@ inline void mtr_t::page_delete(const buf_block_t &block, ulint prev_rec,
   ut_ad(hdr_size < MIN_3BYTE);
   ut_ad(prev_rec < block.physical_size());
   ut_ad(data_size < block.physical_size());
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   size_t len= prev_rec < MIN_2BYTE ? 2 : prev_rec < MIN_3BYTE ? 3 : 4;
   len+= hdr_size < MIN_2BYTE ? 1 : 2;
@@ -642,7 +605,7 @@ inline void mtr_t::undo_append(const buf_block_t &block,
 {
   ut_ad(len > 2);
   set_modified(block);
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   const bool small= len + 1 < mtr_buf_t::MAX_DATA_SIZE - (1 + 3 + 3 + 5 + 5);
   byte *end= log_write<EXTENDED>(block.page.id(), &block.page, len + 1, small);
@@ -665,7 +628,7 @@ inline void mtr_t::undo_append(const buf_block_t &block,
 @param id       first page identifier that will not be in the file */
 inline void mtr_t::trim_pages(const page_id_t id)
 {
-  if (m_log_mode != MTR_LOG_ALL)
+  if (!is_logged())
     return;
   byte *l= log_write<EXTENDED>(id, nullptr, 1, true);
   *l++= TRIM_PAGES;

@@ -224,6 +224,7 @@ typedef struct st_json_engine_t
 
   int stack[JSON_DEPTH_LIMIT]; /* Keeps the stack of nested JSON structures. */
   int stack_p;                 /* The 'stack' pointer. */
+  volatile uchar *killed_ptr;
 } json_engine_t;
 
 
@@ -377,7 +378,7 @@ int json_find_paths_next(json_engine_t *je, json_find_paths_t *state);
 #define JSON_ERROR_ILLEGAL_SYMBOL (-2)
 
 /*
-  Converst JSON string constant into ordinary string constant
+  Convert JSON string constant into ordinary string constant
   which can involve unpacking json escapes and changing character set.
   Returns negative integer in the case of an error,
   the length of the result otherwise.

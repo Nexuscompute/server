@@ -1,5 +1,5 @@
 /*
-      Copyright (c) 2013, 2015, Oracle and/or its affiliates. All rights reserved.
+      Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
       This program is free software; you can redistribute it and/or modify
       it under the terms of the GNU General Public License, version 2.0,
@@ -130,6 +130,11 @@ TABLE_FIELD_DEF
 table_replication_group_members::m_field_def=
 { 5, field_types };
 
+PFS_engine_table_share_state
+table_replication_group_members::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_replication_group_members::m_share=
 {
@@ -142,8 +147,9 @@ table_replication_group_members::m_share=
   sizeof(PFS_simple_index), /* ref length */
   &m_table_lock,
   &m_field_def,
-  false, /* checked */
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_replication_group_members::create(void)
@@ -193,7 +199,7 @@ int table_replication_group_members::rnd_pos(const void *pos)
     return HA_ERR_END_OF_FILE;
 
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < get_row_count());
+  assert(m_pos.m_index < get_row_count());
   make_row(m_pos.m_index);
 
   return 0;
@@ -245,7 +251,7 @@ int table_replication_group_members::read_row_values(TABLE *table,
   if (unlikely(! m_row_exists))
     return HA_ERR_RECORD_DELETED;
 
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -273,7 +279,7 @@ int table_replication_group_members::read_row_values(TABLE *table,
         set_field_char_utf8(f, m_row.member_state, m_row.member_state_length);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

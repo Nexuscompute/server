@@ -18,6 +18,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111 - 1301 USA*/
 
 # include <thread>
 # include <atomic>
+# include <cstdio>
 # include <libaio.h>
 # include <sys/syscall.h>
 
@@ -128,6 +129,7 @@ class aio_linux final : public aio
           {
             iocb->m_ret_len= event.res;
             iocb->m_err= 0;
+            finish_synchronous(iocb);
           }
           iocb->m_internal_task.m_func= iocb->m_callback;
           iocb->m_internal_task.m_arg= iocb;

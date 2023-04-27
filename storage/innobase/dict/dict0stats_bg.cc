@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2012, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2021, MariaDB Corporation.
+Copyright (c) 2017, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -37,7 +37,6 @@ Created Apr 25, 2012 Vasil Dimov
 # include "mysql/service_wsrep.h"
 # include "wsrep.h"
 # include "log.h"
-# include "wsrep_mysqld.h"
 #endif
 
 #include <vector>
@@ -103,17 +102,18 @@ static void dict_stats_recalc_pool_add(table_id_t id)
 {
   ut_ad(!srv_read_only_mode);
   ut_ad(id);
+  bool schedule = false;
   mysql_mutex_lock(&recalc_pool_mutex);
 
   const auto begin= recalc_pool.begin(), end= recalc_pool.end();
   if (end == std::find_if(begin, end, [&](const recalc &r){return r.id == id;}))
   {
     recalc_pool.emplace_back(recalc{id, recalc::IDLE});
+    schedule = true;
   }
 
   mysql_mutex_unlock(&recalc_pool_mutex);
-
-  if (begin == end)
+  if (schedule)
     dict_stats_schedule_now();
 }
 
@@ -339,8 +339,9 @@ invalid_table_id:
   const bool update_now=
     difftime(time(nullptr), table->stats_last_recalc) >= MIN_RECALC_INTERVAL;
 
-  if (update_now)
-    dict_stats_update(table, DICT_STATS_RECALC_PERSISTENT);
+  const dberr_t err= update_now
+    ? dict_stats_update(table, DICT_STATS_RECALC_PERSISTENT)
+    : DB_SUCCESS_LOCKED_REC;
 
   dict_table_close(table, false, thd, mdl);
 
@@ -361,7 +362,7 @@ done:
     ut_ad(i->state == recalc::IN_PROGRESS);
     recalc_pool.erase(i);
     const bool reschedule= !update_now && recalc_pool.empty();
-    if (!update_now)
+    if (err == DB_SUCCESS_LOCKED_REC)
       recalc_pool.emplace_back(recalc{table_id, recalc::IDLE});
     mysql_mutex_unlock(&recalc_pool_mutex);
     if (reschedule)
@@ -381,7 +382,7 @@ static void dict_stats_func(void*)
   while (dict_stats_process_entry_from_recalc_pool(thd)) {}
   dict_defrag_process_entries_from_defrag_pool(thd);
   set_current_thd(nullptr);
-  innobase_destroy_background_thd(thd);
+  destroy_background_thd(thd);
 }
 
 

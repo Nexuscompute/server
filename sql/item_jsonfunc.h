@@ -24,7 +24,7 @@
 #include "item_cmpfunc.h"      // Item_bool_func
 #include "item_strfunc.h"      // Item_str_func
 #include "item_sum.h"
-
+#include "sql_type_json.h"
 
 class json_path_with_flags
 {
@@ -156,12 +156,9 @@ public:
    :Item_str_func(thd, a, b) { }
   Item_json_func(THD *thd, List<Item> &list)
    :Item_str_func(thd, list) { }
-  bool is_json_type() override { return true; }
-  void make_send_field(THD *thd, Send_field *tmp_field) override
+  const Type_handler *type_handler() const override
   {
-    Item_str_func::make_send_field(thd, tmp_field);
-    static const Lex_cstring fmt(STRING_WITH_LEN("json"));
-    tmp_field->set_format_name(fmt);
+    return Type_handler_json_common::json_type_handler(max_length);
   }
 };
 
@@ -482,9 +479,14 @@ class Item_func_json_length: public Item_long_func
 {
   bool check_arguments() const override
   {
-    return args[0]->check_type_can_return_text(func_name_cstring()) ||
-           (arg_count > 1 &&
-            args[1]->check_type_general_purpose_string(func_name_cstring()));
+    const LEX_CSTRING name= func_name_cstring();
+    if (arg_count == 0 || arg_count > 2)
+    {
+      my_error(ER_WRONG_PARAMCOUNT_TO_NATIVE_FCT, MYF(0), name.str);
+      return true;
+    }
+    return args[0]->check_type_can_return_text(name) ||
+      (arg_count > 1 && args[1]->check_type_general_purpose_string(name));
   }
 protected:
   json_path_with_flags path;
@@ -692,7 +694,10 @@ public:
   }
   Item_func_json_arrayagg(THD *thd, Item_func_json_arrayagg *item) :
     Item_func_group_concat(thd, item) {}
-  bool is_json_type() override { return true; }
+  const Type_handler *type_handler() const override
+  {
+    return Type_handler_json_common::json_type_handler_sum(this);
+  }
 
   LEX_CSTRING func_name_cstring() const override
   {
@@ -721,7 +726,6 @@ public:
   }
 
   Item_func_json_objectagg(THD *thd, Item_func_json_objectagg *item);
-  bool is_json_type() override { return true; }
   void cleanup() override;
 
   enum Sumfunctype sum_func () const override { return JSON_OBJECTAGG_FUNC;}
@@ -732,9 +736,7 @@ public:
   }
   const Type_handler *type_handler() const override
   {
-    if (too_big_for_varchar())
-      return &type_handler_blob;
-    return &type_handler_varchar;
+    return Type_handler_json_common::json_type_handler_sum(this);
   }
   void clear() override;
   bool add() override;
@@ -760,5 +762,6 @@ public:
   { return get_item_copy<Item_func_json_objectagg>(thd, this); }
 };
 
+extern bool is_json_type(const Item *item);
 
 #endif /* ITEM_JSONFUNC_INCLUDED */

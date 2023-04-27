@@ -1479,6 +1479,9 @@ execute stmt;
 execute stmt;
 deallocate prepare stmt;
 
+#enable after fix MDEV-28603
+--disable_view_protocol
+
 let $q2=
 select (values ((select * from t1 where a > 10))) from t2;
 eval $q2;
@@ -1514,6 +1517,8 @@ eval prepare stmt from "$q4";
 execute stmt;
 execute stmt;
 deallocate prepare stmt;
+
+--enable_view_protocol
 
 drop view v1;
 drop table t1,t2,t3;
@@ -1586,6 +1591,10 @@ values ((values (2))), ((values ((values (4)))))
 union all
 values ((values (8))), ((values ((select 4))));
 
+#A view definition cannot contain a subquery in the FROM clause 
+# in the SELECT statement
+--disable_view_protocol
+
 select * from (values ((values (2)))) dt;
 
 select * from (values ((values (2)), (5), (select 4))) dt;
@@ -1597,6 +1606,8 @@ select * from (values ((values (2))), ((values (3)))) dt;
 select * from (values ((values (2))), ((values (3)))) dt;
 
 select * from (values ((values (2))), ((select 4)), ((values (3)))) dt;
+
+--enable_view_protocol
 
 create table t1 (a int);
 insert into t1 values (3), (7), (1);
@@ -1621,9 +1632,15 @@ values ((values ((select (values(2)) from t1 where a=8))));
 --error ER_SUBQUERY_NO_1_ROW
 values ((select (values(2)) from t1 where a<7));
 
+#A view definition cannot contain a subquery in the FROM clause 
+# in the SELECT statement
+--disable_view_protocol
+
 select * from (values ((values ((select a from t1 where a=7))))) dt;
 
 select * from (values ((values ((select (values(2)) from t1 where a=8))))) dt;
+
+--enable_view_protocol
 
 insert into t1(a) values ((values (2))), ((values (3)));
 select * from t1;
@@ -1634,6 +1651,10 @@ drop table t1;
 --echo #
 --echo # MDEV-25484: Derived table using TVC with LIMIT and ORDER BY
 --echo #
+
+#A view definition cannot contain a subquery in the FROM clause 
+# in the SELECT statement
+--disable_view_protocol
 
 create table t1 (a int);
 insert into t1 values (3), (7), (1);
@@ -1651,6 +1672,8 @@ values (3),(7),(1) union values (2),(4) order by 1 limit 2;
 select * from (values (3),(7),(1) union values (2),(4) order by 1 limit 2) as dt;
 
 drop table t1;
+
+--enable_view_protocol
 
 --echo #
 --echo # MDEV-23182: Server crashes in
@@ -1714,6 +1737,80 @@ INSERT INTO t1 (VALUES (DEFAULT) UNION VALUES (DEFAULT));
 --error ER_NOT_ALLOWED_IN_THIS_CONTEXT
 INSERT INTO t1 (VALUES (IGNORE) UNION VALUES (IGNORE));
 DROP TABLE t1;
+
+--echo #
+--echo # MDEV-28603: VIEW with table value constructor used as single-value
+--echo #             subquery contains subquery as its first element
+--echo #
+
+create table t1 (a int);
+insert into t1 values (3), (7), (1);
+create table t2 (b int);
+insert into t2 values (1), (2);
+
+let $q=
+select (values ((select * from t1 where a > 5))) as m from t2;
+
+eval create view v as $q;
+
+eval $q;
+eval select * from v;
+eval with cte as ( $q ) select * from cte;
+
+eval explain $q;
+eval explain select * from v;
+eval explain with cte as ( $q ) select * from cte;
+
+eval prepare stmt from "$q";
+execute stmt;
+execute stmt;
+deallocate prepare stmt;
+
+eval prepare stmt from "select * from v";
+execute stmt;
+execute stmt;
+deallocate prepare stmt;
+
+eval prepare stmt from "with cte as ( $q ) select * from cte";
+execute stmt;
+execute stmt;
+deallocate prepare stmt;
+
+show create view v;
+
+drop view v;
+
+eval prepare stmt from "create view v as $q";
+execute stmt;
+show create view v;
+select * from v;
+drop view v;
+execute stmt;
+show create view v;
+select * from v;
+deallocate prepare stmt;
+
+prepare stmt from "show create view v";
+execute stmt;
+execute stmt;
+deallocate prepare stmt;
+
+drop view v;
+
+let $q=
+select (values ((select * from t1 where a > 5
+                 union
+                 select * from t1 where a > 7))) as m from t2;
+
+eval create view v as $q;
+
+eval $q;
+eval select * from v;
+
+show create view v;
+
+drop view v;
+drop table t1,t2;
 
 --echo #
 --echo # End of 10.4 tests

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2021, MariaDB Corporation.
+Copyright (c) 2017, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -104,6 +104,9 @@ row_vers_impl_x_locked_low(
 	DBUG_ENTER("row_vers_impl_x_locked_low");
 
 	ut_ad(rec_offs_validate(rec, index, offsets));
+	ut_ad(mtr->memo_contains_page_flagged(clust_rec,
+					      MTR_MEMO_PAGE_S_FIX
+					      | MTR_MEMO_PAGE_X_FIX));
 
 	if (ulint trx_id_offset = clust_index->trx_id_offset) {
 		trx_id = mach_read_from_6(clust_rec + trx_id_offset);
@@ -190,7 +193,7 @@ row_vers_impl_x_locked_low(
 		heap = mem_heap_create(1024);
 
 		trx_undo_prev_version_build(
-			clust_rec, mtr, version, clust_index, clust_offsets,
+			version, clust_index, clust_offsets,
 			heap, &prev_version, NULL,
 			dict_index_has_virtual(index) ? &vrow : NULL, 0);
 
@@ -325,7 +328,7 @@ not_locked:
 
 		/* We check if entry and rec are identified in the alphabetical
 		ordering */
-		if (0 == cmp_dtuple_rec(entry, rec, offsets)) {
+		if (0 == cmp_dtuple_rec(entry, rec, index, offsets)) {
 			/* The delete marks of rec and prev_version should be
 			equal for rec to be in the state required by
 			prev_version */
@@ -343,7 +346,7 @@ not_locked:
 			dtuple_set_types_binary(
 				entry, dtuple_get_n_fields(entry));
 
-			if (0 != cmp_dtuple_rec(entry, rec, offsets)) {
+			if (cmp_dtuple_rec(entry, rec, index, offsets)) {
 
 				break;
 			}
@@ -527,6 +530,10 @@ row_vers_build_cur_vrow_low(
 			 = DATA_MISSING;
 	}
 
+	ut_ad(mtr->memo_contains_page_flagged(rec,
+					      MTR_MEMO_PAGE_S_FIX
+					      | MTR_MEMO_PAGE_X_FIX));
+
 	version = rec;
 
 	/* If this is called by purge thread, set TRX_UNDO_PREV_IN_PURGE
@@ -543,7 +550,7 @@ row_vers_build_cur_vrow_low(
 			version, clust_index, clust_offsets);
 
 		trx_undo_prev_version_build(
-			rec, mtr, version, clust_index, clust_offsets,
+			version, clust_index, clust_offsets,
 			heap, &prev_version, NULL, vrow, status);
 
 		if (heap2) {
@@ -643,6 +650,10 @@ row_vers_vc_matches_cluster(
 	/* First compare non-virtual columns (primary keys) */
 	ut_ad(index->n_fields == n_fields);
 	ut_ad(n_fields == dtuple_get_n_fields(icentry));
+	ut_ad(mtr->memo_contains_page_flagged(rec,
+					      MTR_MEMO_PAGE_S_FIX
+					      | MTR_MEMO_PAGE_X_FIX));
+
 	{
 		const dfield_t* a = ientry->fields;
 		const dfield_t* b = icentry->fields;
@@ -684,7 +695,7 @@ row_vers_vc_matches_cluster(
 		ut_ad(roll_ptr != 0);
 
 		trx_undo_prev_version_build(
-			rec, mtr, version, clust_index, clust_offsets,
+			version, clust_index, clust_offsets,
 			heap, &prev_version, NULL, vrow,
 			TRX_UNDO_PREV_IN_PURGE | TRX_UNDO_GET_OLD_V_VALUE);
 
@@ -730,7 +741,7 @@ row_vers_vc_matches_cluster(
 
 				/* The index field mismatch */
 				if (v_heap
-				    || cmp_dfield_dfield(field2, field1) != 0) {
+				    || cmp_dfield_dfield(field2, field1)) {
 					if (v_heap) {
 						dtuple_dup_v_fld(*vrow, v_heap);
 					}
@@ -833,8 +844,47 @@ row_vers_build_cur_vrow(
 	return(cur_vrow);
 }
 
+/** @return whether two data tuples are equal */
+static bool dtuple_coll_eq(const dtuple_t &tuple1, const dtuple_t &tuple2)
+{
+  ut_ad(tuple1.magic_n == DATA_TUPLE_MAGIC_N);
+  ut_ad(tuple2.magic_n == DATA_TUPLE_MAGIC_N);
+  ut_ad(dtuple_check_typed(&tuple1));
+  ut_ad(dtuple_check_typed(&tuple2));
+  ut_ad(tuple1.n_fields == tuple2.n_fields);
+
+  for (ulint i= 0; i < tuple1.n_fields; i++)
+    if (cmp_dfield_dfield(&tuple1.fields[i], &tuple2.fields[i]))
+      return false;
+  return true;
+}
+
+/** Find out whether data tuple has missing data type
+for indexed virtual column.
+@param tuple   data tuple
+@param index   virtual index
+@return true if tuple has missing column type */
+static bool dtuple_vcol_data_missing(const dtuple_t &tuple,
+                                     dict_index_t *index)
+{
+  for (ulint i= 0; i < index->n_uniq; i++)
+  {
+    dict_col_t *col= index->fields[i].col;
+    if (!col->is_virtual())
+      continue;
+    dict_v_col_t *vcol= reinterpret_cast<dict_v_col_t*>(col);
+    for (ulint j= 0; j < index->table->n_v_cols; j++)
+    {
+      if (vcol == &index->table->v_cols[j]
+          && tuple.v_fields[j].type.mtype == DATA_MISSING)
+        return true;
+    }
+  }
+  return false;
+}
+
 /** Finds out if a version of the record, where the version >= the current
-purge view, should have ientry as its secondary index entry. We check
+purge_sys.view, should have ientry as its secondary index entry. We check
 if there is any not delete marked version of the record where the trx
 id >= purge view, and the secondary index entry == ientry; exactly in
 this case we return TRUE.
@@ -933,7 +983,7 @@ row_vers_old_has_index_entry(
 
 				entry = row_build_index_entry(
 					row, ext, index, heap);
-				if (entry && !dtuple_coll_cmp(ientry, entry)) {
+				if (entry && dtuple_coll_eq(*ientry, *entry)) {
 					goto unsafe_to_purge;
 				}
 			} else {
@@ -988,7 +1038,7 @@ row_vers_old_has_index_entry(
 			the clustered index record has already been updated to
 			a different binary value in a char field, but the
 			collation identifies the old and new value anyway! */
-			if (entry && !dtuple_coll_cmp(ientry, entry)) {
+			if (entry && dtuple_coll_eq(*ientry, *entry)) {
 unsafe_to_purge:
 				mem_heap_free(heap);
 
@@ -1016,11 +1066,12 @@ unsafe_to_purge:
 		heap = mem_heap_create(1024);
 		vrow = NULL;
 
-		trx_undo_prev_version_build(rec, mtr, version,
+		trx_undo_prev_version_build(version,
 					    clust_index, clust_offsets,
-					    heap, &prev_version, NULL,
+					    heap, &prev_version, nullptr,
 					    dict_index_has_virtual(index)
-						? &vrow : NULL, 0);
+					    ? &vrow : nullptr,
+					    TRX_UNDO_CHECK_PURGEABILITY);
 		mem_heap_free(heap2); /* free version and clust_offsets */
 
 		if (!prev_version) {
@@ -1041,6 +1092,9 @@ unsafe_to_purge:
 
 		if (dict_index_has_virtual(index)) {
 			if (vrow) {
+				if (dtuple_vcol_data_missing(*vrow, index)) {
+					goto nochange_index;
+				}
 				/* Keep the virtual row info for the next
 				version, unless it is changed */
 				mem_heap_empty(v_heap);
@@ -1051,6 +1105,7 @@ unsafe_to_purge:
 			if (!cur_vrow) {
 				/* Nothing for this index has changed,
 				continue */
+nochange_index:
 				version = prev_version;
 				continue;
 			}
@@ -1086,7 +1141,7 @@ unsafe_to_purge:
 			a char field, but the collation identifies the old
 			and new value anyway! */
 
-			if (entry && !dtuple_coll_cmp(ientry, entry)) {
+			if (entry && dtuple_coll_eq(*ientry, *entry)) {
 				goto unsafe_to_purge;
 			}
 		}
@@ -1099,7 +1154,9 @@ unsafe_to_purge:
 Constructs the version of a clustered index record which a consistent
 read should see. We assume that the trx id stored in rec is such that
 the consistent read should not see rec in its present version.
-@return DB_SUCCESS or DB_MISSING_HISTORY */
+@return error code
+@retval DB_SUCCESS if a previous version was fetched
+@retval DB_MISSING_HISTORY if the history is missing (a sign of corruption) */
 dberr_t
 row_vers_build_for_consistent_read(
 /*===============================*/
@@ -1139,7 +1196,7 @@ row_vers_build_for_consistent_read(
 
 	trx_id = row_get_rec_trx_id(rec, index, *offsets);
 
-	ut_ad(!view->changes_visible(trx_id, index->table->name));
+	ut_ad(!view->changes_visible(trx_id));
 
 	ut_ad(!vrow || !(*vrow));
 
@@ -1157,11 +1214,9 @@ row_vers_build_for_consistent_read(
 		/* If purge can't see the record then we can't rely on
 		the UNDO log record. */
 
-		bool	purge_sees = trx_undo_prev_version_build(
-			rec, mtr, version, index, *offsets, heap,
+		err = trx_undo_prev_version_build(
+			version, index, *offsets, heap,
 			&prev_version, NULL, vrow, 0);
-
-		err  = (purge_sees) ? DB_SUCCESS : DB_MISSING_HISTORY;
 
 		if (prev_heap != NULL) {
 			mem_heap_free(prev_heap);
@@ -1184,7 +1239,7 @@ row_vers_build_for_consistent_read(
 
 		trx_id = row_get_rec_trx_id(prev_version, index, *offsets);
 
-		if (view->changes_visible(trx_id, index->table->name)) {
+		if (view->changes_visible(trx_id)) {
 
 			/* The view already sees this version: we can copy
 			it to in_heap and return */
@@ -1201,8 +1256,11 @@ row_vers_build_for_consistent_read(
 				dtuple_dup_v_fld(*vrow, in_heap);
 			}
 			break;
+		} else if (trx_id >= view->low_limit_id()
+			   && trx_id >= trx_sys.get_max_trx_id()) {
+			err = DB_CORRUPTION;
+			break;
 		}
-
 		version = prev_version;
 	}
 
@@ -1211,6 +1269,10 @@ row_vers_build_for_consistent_read(
 	return(err);
 }
 
+#if defined __aarch64__&&defined __GNUC__&&__GNUC__==4&&!defined __clang__
+/* Avoid GCC 4.8.5 internal compiler error "could not split insn". */
+# pragma GCC optimize ("O0")
+#endif
 /*****************************************************************//**
 Constructs the last committed version of a clustered index record,
 which should be seen by a semi-consistent read. */
@@ -1315,10 +1377,9 @@ committed_version_trx:
 		heap2 = heap;
 		heap = mem_heap_create(1024);
 
-		if (!trx_undo_prev_version_build(rec, mtr, version, index,
-						 *offsets, heap,
-						 &prev_version,
-						 in_heap, vrow, 0)) {
+		if (trx_undo_prev_version_build(version, index, *offsets, heap,
+						&prev_version, in_heap, vrow,
+						0) != DB_SUCCESS) {
 			mem_heap_free(heap);
 			heap = heap2;
 			heap2 = NULL;

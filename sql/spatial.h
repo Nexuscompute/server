@@ -214,8 +214,8 @@ struct Geometry_buffer;
 class Geometry
 {
 public:
-  Geometry() {}                               /* Remove gcc warning */
-  virtual ~Geometry() {}                        /* Remove gcc warning */
+  Geometry() = default;                              /* Remove gcc warning */
+  virtual ~Geometry() = default;                     /* Remove gcc warning */
   static void *operator new(size_t size, void *buffer)
   {
     return buffer;
@@ -353,6 +353,7 @@ protected:
   const char *get_mbr_for_points(MBR *mbr, const char *data, uint offset)
     const;
 
+public:
   /**
      Check if there're enough data remaining as requested
 
@@ -383,6 +384,7 @@ protected:
             (expected_points > ((m_data_end - data) /
                                 (POINT_DATA_SIZE + extra_point_space))));
   }
+protected:
   const char *m_data;
   const char *m_data_end;
 };
@@ -393,8 +395,8 @@ protected:
 class Gis_point: public Geometry
 {
 public:
-  Gis_point() {}                              /* Remove gcc warning */
-  virtual ~Gis_point() {}                     /* Remove gcc warning */
+  Gis_point() = default;                              /* Remove gcc warning */
+  virtual ~Gis_point() = default;                     /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -463,8 +465,8 @@ public:
 class Gis_line_string: public Geometry
 {
 public:
-  Gis_line_string() {}                        /* Remove gcc warning */
-  virtual ~Gis_line_string() {}               /* Remove gcc warning */
+  Gis_line_string() = default;                        /* Remove gcc warning */
+  virtual ~Gis_line_string() = default;               /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -496,8 +498,8 @@ public:
 class Gis_polygon: public Geometry
 {
 public:
-  Gis_polygon() {}                            /* Remove gcc warning */
-  virtual ~Gis_polygon() {}                   /* Remove gcc warning */
+  Gis_polygon() = default;                            /* Remove gcc warning */
+  virtual ~Gis_polygon() = default;                   /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -533,8 +535,8 @@ class Gis_multi_point: public Geometry
     (uint32) (UINT_MAX32 - WKB_HEADER_SIZE - 4 /* n_points */) /
     (WKB_HEADER_SIZE + POINT_DATA_SIZE);
 public:
-  Gis_multi_point() {}                        /* Remove gcc warning */
-  virtual ~Gis_multi_point() {}               /* Remove gcc warning */
+  Gis_multi_point() = default;                        /* Remove gcc warning */
+  virtual ~Gis_multi_point() = default;               /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -564,8 +566,8 @@ public:
 class Gis_multi_line_string: public Geometry
 {
 public:
-  Gis_multi_line_string() {}                  /* Remove gcc warning */
-  virtual ~Gis_multi_line_string() {}         /* Remove gcc warning */
+  Gis_multi_line_string() = default;                  /* Remove gcc warning */
+  virtual ~Gis_multi_line_string() = default;         /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -595,8 +597,8 @@ public:
 class Gis_multi_polygon: public Geometry
 {
 public:
-  Gis_multi_polygon() {}                      /* Remove gcc warning */
-  virtual ~Gis_multi_polygon() {}             /* Remove gcc warning */
+  Gis_multi_polygon() = default;                      /* Remove gcc warning */
+  virtual ~Gis_multi_polygon() = default;             /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);
@@ -626,8 +628,8 @@ public:
 class Gis_geometry_collection: public Geometry
 {
 public:
-  Gis_geometry_collection() {}                /* Remove gcc warning */
-  virtual ~Gis_geometry_collection() {}       /* Remove gcc warning */
+  Gis_geometry_collection() = default;                /* Remove gcc warning */
+  virtual ~Gis_geometry_collection() = default;       /* Remove gcc warning */
   uint32 get_data_size() const;
   bool init_from_wkt(Gis_read_stream *trs, String *wkb);
   uint init_from_wkb(const char *wkb, uint len, wkbByteOrder bo, String *res);

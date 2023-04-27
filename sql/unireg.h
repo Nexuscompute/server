@@ -62,7 +62,7 @@
 #define SPECIAL_WAIT_IF_LOCKED	8		/* Wait if locked database */
 #define SPECIAL_SAME_DB_NAME   16		/* form name = file name */
 #define SPECIAL_ENGLISH        32		/* English error messages */
-#define SPECIAL_NO_RESOLVE     64		/* Don't use gethostname */
+#define SPECIAL_NO_RESOLVE     64		/* Obsolete */
 #define SPECIAL_NO_PRIOR	128		/* Obsolete */
 #define SPECIAL_BIG_SELECTS	256		/* Don't use heap tables */
 #define SPECIAL_NO_HOST_CACHE	512		/* Don't cache hosts */
@@ -191,6 +191,22 @@ enum extra2_index_flags {
   EXTRA2_DEFAULT_INDEX_FLAGS,
   EXTRA2_IGNORED_KEY
 };
+
+
+static inline size_t extra2_read_len(const uchar **extra2, const uchar *end)
+{
+  size_t length= *(*extra2)++;
+  if (length)
+    return length;
+
+  if ((*extra2) + 2 >= end)
+    return 0;
+  length= uint2korr(*extra2);
+  (*extra2)+= 2;
+  if (length < 256 || *extra2 + length > end)
+    return 0;
+  return length;
+}
 
 LEX_CUSTRING build_frm_image(THD *thd, const LEX_CSTRING &table,
                              HA_CREATE_INFO *create_info,

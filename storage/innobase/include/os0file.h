@@ -385,6 +385,14 @@ os_file_set_nocache(
 	const char*	operation_name);
 #endif
 
+#ifndef _WIN32 /* On Microsoft Windows, mandatory locking is used */
+/** Obtain an exclusive lock on a file.
+@param fd      file descriptor
+@param name    file name
+@return 0 on success */
+int os_file_lock(int fd, const char *name);
+#endif
+
 /** NOTE! Use the corresponding macro os_file_create(), not directly
 this function!
 Opens an existing file or creates a new.
@@ -447,7 +455,6 @@ bool os_file_close_func(os_file_t file);
 
 /* Keys to register InnoDB I/O with performance schema */
 extern mysql_pfs_key_t	innodb_data_file_key;
-extern mysql_pfs_key_t	innodb_log_file_key;
 extern mysql_pfs_key_t	innodb_temp_file_key;
 
 /* Following four macros are instumentations to register
@@ -565,12 +572,8 @@ The wrapper functions have the prefix of "innodb_". */
 # define os_file_close(file)						\
 	pfs_os_file_close_func(file, __FILE__, __LINE__)
 
-# define os_file_read(type, file, buf, offset, n)			\
-	pfs_os_file_read_func(type, file, buf, offset, n, __FILE__, __LINE__)
-
-# define os_file_read_no_error_handling(type, file, buf, offset, n, o)	\
-	pfs_os_file_read_no_error_handling_func(			\
-		type, file, buf, offset, n, o, __FILE__, __LINE__)
+# define os_file_read(type, file, buf, offset, n, o)			\
+	pfs_os_file_read_func(type, file, buf, offset, n,o, __FILE__, __LINE__)
 
 # define os_file_write(type, name, file, buf, offset, n)	\
 	pfs_os_file_write_func(type, name, file, buf, offset,	\
@@ -715,31 +718,6 @@ pfs_os_file_read_func(
 	void*			buf,
 	os_offset_t		offset,
 	ulint			n,
-	const char*		src_file,
-	uint			src_line);
-
-/** NOTE! Please use the corresponding macro os_file_read_no_error_handling(),
-not directly this function!
-This is the performance schema instrumented wrapper function for
-os_file_read_no_error_handling_func() which requests a synchronous
-read operation.
-@param[in]	type		IO request context
-@param[in]	file		Open file handle
-@param[out]	buf		buffer where to read
-@param[in]	offset		file offset where to read
-@param[in]	n		number of bytes to read
-@param[out]	o		number of bytes actually read
-@param[in]	src_file	file name where func invoked
-@param[in]	src_line	line where the func invoked
-@return DB_SUCCESS if request was successful */
-UNIV_INLINE
-dberr_t
-pfs_os_file_read_no_error_handling_func(
-	const IORequest&	type,
-	pfs_os_file_t		file,
-	void*			buf,
-	os_offset_t		offset,
-	ulint			n,
 	ulint*			o,
 	const char*		src_file,
 	uint			src_line);
@@ -865,11 +843,8 @@ to original un-instrumented file I/O APIs */
 
 # define os_file_close(file)	os_file_close_func(file)
 
-# define os_file_read(type, file, buf, offset, n)			\
-	os_file_read_func(type, file, buf, offset, n)
-
-# define os_file_read_no_error_handling(type, file, buf, offset, n, o)	\
-	os_file_read_no_error_handling_func(type, file, buf, offset, n, o)
+# define os_file_read(type, file, buf, offset, n, o)		\
+	os_file_read_func(type, file, buf, offset, n, o)
 
 # define os_file_write(type, name, file, buf, offset, n)	\
 	os_file_write_func(type, name, file, buf, offset, n)
@@ -958,13 +933,14 @@ os_file_flush_func(
 /** Retrieves the last error number if an error occurs in a file io function.
 The number should be retrieved before any other OS calls (because they may
 overwrite the error number). If the number is not known to this program,
-the OS error number + 100 is returned.
-@param[in]	report		true if we want an error message printed
-				for all errors
-@return error number, or OS error number + 100 */
-ulint
-os_file_get_last_error(
-	bool		report);
+the OS error number + OS_FILE_ERROR_MAX is returned.
+@param[in]	report_all_errors	true if we want an error message
+                                        printed of all errors
+@param[in]	on_error_silent		true then don't print any diagnostic
+                                        to the log
+@return error number, or OS error number + OS_FILE_ERROR_MAX */
+ulint os_file_get_last_error(bool report_all_errors,
+                             bool on_error_silent= false);
 
 /** NOTE! Use the corresponding macro os_file_read(), not directly this
 function!
@@ -974,6 +950,7 @@ Requests a synchronous read operation.
 @param[out]	buf		buffer where to read
 @param[in]	offset		file offset where to read
 @param[in]	n		number of bytes to read
+@param[out]	o		number of bytes actually read
 @return DB_SUCCESS if request was successful */
 dberr_t
 os_file_read_func(
@@ -981,7 +958,8 @@ os_file_read_func(
 	os_file_t		file,
 	void*			buf,
 	os_offset_t		offset,
-	ulint			n)
+	ulint			n,
+	ulint*			o)
 	MY_ATTRIBUTE((warn_unused_result));
 
 /** Rewind file to its start, read at most size - 1 bytes from it to str, and
@@ -995,27 +973,6 @@ os_file_read_string(
 	FILE*		file,
 	char*		str,
 	ulint		size);
-
-/** NOTE! Use the corresponding macro os_file_read_no_error_handling(),
-not directly this function!
-Requests a synchronous positioned read operation. This function does not do
-any error handling. In case of error it returns FALSE.
-@param[in]	type		IO request context
-@param[in]	file		Open file handle
-@param[out]	buf		buffer where to read
-@param[in]	offset		file offset where to read
-@param[in]	n		number of bytes to read
-@param[out]	o		number of bytes actually read
-@return DB_SUCCESS or error code */
-dberr_t
-os_file_read_no_error_handling_func(
-	const IORequest&	type,
-	os_file_t		file,
-	void*			buf,
-	os_offset_t		offset,
-	ulint			n,
-	ulint*			o)
-	MY_ATTRIBUTE((warn_unused_result));
 
 /** NOTE! Use the corresponding macro os_file_write(), not directly this
 function!
@@ -1046,23 +1003,6 @@ os_file_status(
 	const char*	path,
 	bool*		exists,
 	os_file_type_t* type);
-
-/** This function returns a new path name after replacing the basename
-in an old path with a new basename.  The old_path is a full path
-name including the extension.  The tablename is in the normal
-form "databasename/tablename".  The new base name is found after
-the forward slash.  Both input strings are null terminated.
-
-This function allocates memory to be returned.  It is the callers
-responsibility to free the return value after it is no longer needed.
-
-@param[in]	old_path		pathname
-@param[in]	new_name		new file name
-@return own: new full pathname */
-char*
-os_file_make_new_pathname(
-	const char*	old_path,
-	const char*	new_name);
 
 /** This function reduces a null-terminated full remote path name into
 the path that is sent by MySQL for DATA DIRECTORY clause.  It replaces
@@ -1109,11 +1049,20 @@ void os_aio_free();
 @retval DB_IO_ERROR on I/O error */
 dberr_t os_aio(const IORequest &type, void *buf, os_offset_t offset, size_t n);
 
-/** Wait until there are no pending asynchronous writes. */
-void os_aio_wait_until_no_pending_writes();
+/** @return number of pending reads */
+size_t os_aio_pending_reads();
+/** @return approximate number of pending reads */
+size_t os_aio_pending_reads_approx();
+/** @return number of pending writes */
+size_t os_aio_pending_writes();
 
-/** Wait until all pending asynchronous reads have completed. */
-void os_aio_wait_until_no_pending_reads();
+/** Wait until there are no pending asynchronous writes.
+@param declare  whether the wait will be declared in tpool */
+void os_aio_wait_until_no_pending_writes(bool declare);
+
+/** Wait until all pending asynchronous reads have completed.
+@param declare  whether the wait will be declared in tpool */
+void os_aio_wait_until_no_pending_reads(bool declare);
 
 /** Prints info of the aio arrays.
 @param[in/out]	file		file where to print */
@@ -1225,6 +1174,6 @@ inline bool is_absolute_path(const char *path)
   return false;
 }
 
-#include "os0file.ic"
+#include "os0file.inl"
 
 #endif /* os0file_h */

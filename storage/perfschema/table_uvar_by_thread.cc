@@ -1,4 +1,4 @@
-/* Copyright (c) 2013, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -129,6 +129,11 @@ void User_variables::materialize(PFS_thread *pfs, THD *thd)
 
 THR_LOCK table_uvar_by_thread::m_table_lock;
 
+PFS_engine_table_share_state
+table_uvar_by_thread::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_uvar_by_thread::m_share=
 {
@@ -144,7 +149,9 @@ table_uvar_by_thread::m_share=
   "THREAD_ID BIGINT unsigned not null comment 'The thread identifier of the session in which the variable is defined.',"
   "VARIABLE_NAME VARCHAR(64) not null comment 'The variable name, without the leading @ character.',"
   "VARIABLE_VALUE LONGBLOB comment 'The variable value')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -286,11 +293,11 @@ int table_uvar_by_thread
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
-  DBUG_ASSERT(m_row.m_variable_name != NULL);
-  DBUG_ASSERT(m_row.m_variable_value != NULL);
+  assert(m_row.m_variable_name != NULL);
+  assert(m_row.m_variable_value != NULL);
 
   for (; (f= *fields) ; fields++)
   {
@@ -319,7 +326,7 @@ int table_uvar_by_thread
         }
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

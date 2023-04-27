@@ -1,5 +1,5 @@
 # Copyright (c) 2006, 2014, Oracle and/or its affiliates.
-# Copyright (c) 2010, 2021, MariaDB Corporation.
+# Copyright (c) 2010, 2022, MariaDB Corporation.
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -181,6 +181,13 @@ SET (SQL_SOURCE
                ${MYSYS_LIBWRAP_SOURCE}
 )
 
+IF(CMAKE_C_COMPILER_ID MATCHES "Clang" AND
+   NOT CMAKE_C_COMPILER_VERSION VERSION_LESS "13.0.0")
+  ADD_COMPILE_FLAGS(${CMAKE_CURRENT_BINARY_DIR}/yy_mariadb.cc
+    ${CMAKE_CURRENT_BINARY_DIR}/yy_oracle.cc
+    COMPILE_FLAGS "-Wno-unused-but-set-variable")
+ENDIF()
+
 IF ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR
      CMAKE_SYSTEM_NAME MATCHES "SunOS" OR
      WIN32 OR
@@ -224,6 +231,15 @@ FOREACH(se aria partition perfschema sql_sequence wsrep)
     TARGET_LINK_LIBRARIES(sql ${se})
   ENDIF()
 ENDFOREACH()
+
+IF(VISIBILITY_HIDDEN_FLAG AND TARGET partition AND WITH_UBSAN)
+  # the spider plugin needs some partition symbols from inside mysqld
+  # when built with ubsan, in which case we need to remove
+  # -fvisibility=hidden from partition
+  GET_TARGET_PROPERTY(f partition COMPILE_FLAGS)
+  STRING(REPLACE "${VISIBILITY_HIDDEN_FLAG}" "" f ${f})
+  SET_TARGET_PROPERTIES(partition PROPERTIES COMPILE_FLAGS "${f}")
+ENDIF()
 
 IF(WIN32)
   SET(MYSQLD_SOURCE main.cc  message.rc)
@@ -486,7 +502,8 @@ IF(WIN32)
     password.c
     COMPONENT Server
   )
-  SET_TARGET_PROPERTIES(mariadb-install-db PROPERTIES COMPILE_FLAGS -DINSTALL_PLUGINDIR=${INSTALL_PLUGINDIR})
+  SET_TARGET_PROPERTIES(mariadb-install-db PROPERTIES COMPILE_DEFINITIONS
+   "INSTALL_PLUGINDIR=${INSTALL_PLUGINDIR};INSTALL_SHAREDIR=${INSTALL_SHAREDIR}")
   TARGET_LINK_LIBRARIES(mariadb-install-db mysys mysys_ssl shlwapi)
 
   ADD_LIBRARY(winservice STATIC winservice.c)
@@ -499,7 +516,11 @@ IF(WIN32)
   TARGET_LINK_LIBRARIES(mariadb-upgrade-service mysys winservice)
 ENDIF(WIN32)
 
+IF(NOT WITH_WSREP)
+  SET(EXCL_WSREP "wsrep_[a-np-z]*.h")
+ENDIF()
 INSTALL(DIRECTORY . DESTINATION ${INSTALL_INCLUDEDIR}/server/private COMPONENT Development
   FILES_MATCHING PATTERN "*.h"
   PATTERN share EXCLUDE
+  PATTERN "${EXCL_WSREP}" EXCLUDE
   PATTERN CMakeFiles EXCLUDE)

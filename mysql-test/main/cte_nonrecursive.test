@@ -1048,6 +1048,8 @@ drop table t1;
 --echo # MDEV-16473: query with CTE when no database is set
 --echo #
 
+# Enable view protocol after fix MDEV-27944
+--disable_view_protocol
 create database db_mdev_16473;
 use db_mdev_16473;
 drop database db_mdev_16473;
@@ -1071,6 +1073,7 @@ select * from cte, db_mdev_16473.t1 as t where cte.a=t.a;
 drop database db_mdev_16473;
 
 use test;
+--enable_view_protocol
 
 --echo #
 --echo # MDEV-17154: using parameter markers for PS within CTEs more than once
@@ -1217,6 +1220,8 @@ DROP TABLE test.t;
 --echo # MDEV-22781: create view with CTE without default database
 --echo #
 
+# Enable view protocol after fix MDEV-27944
+--disable_view_protocol
 create database db;
 use db;
 drop database db;
@@ -1242,6 +1247,7 @@ drop table db1.t1;
 drop database db1;
 
 use test;
+--enable_view_protocol
 
 --echo #
 --echo # MDEV-24597: CTE with union used multiple times in query
@@ -1636,6 +1642,42 @@ delete t1 from t1, t2
 select * from t1;
 
 drop table t1,t2;
+
+--echo #
+--echo # MDEV-25766: Unused CTE lead to a crash in
+--echo # find_field_in_tables/find_order_in_list
+--echo #
+
+create table t1 (f1 INTEGER);
+
+create view v1 as
+select
+    subq_0.c4 as c2,
+    subq_0.c4 as c4
+  from
+    (select
+          ref_0.f1 as c4
+        from
+          t1 as ref_0
+        where (select 1)
+        ) as subq_0
+  order by c2, c4 desc;
+
+WITH
+unused_with AS (select
+    subq_0.c4 as c6
+  from
+    (select
+            11 as c4
+          from
+            v1 as ref_0
+     ) as subq_0,
+     v1 as ref_2
+)
+select 1 ;
+
+drop view v1;
+drop table t1;
 
 --echo # End of 10.2 tests
 

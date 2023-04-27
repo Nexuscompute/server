@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2021, MariaDB Corporation.
+Copyright (c) 2017, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -35,7 +35,6 @@ Created April 08, 2011 Vasil Dimov
 #include "buf0dump.h"
 #include "dict0dict.h"
 #include "os0file.h"
-#include "os0thread.h"
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "ut0byte.h"
@@ -417,73 +416,6 @@ done:
 }
 
 /*****************************************************************//**
-Artificially delay the buffer pool loading if necessary. The idea of
-this function is to prevent hogging the server with IO and slowing down
-too much normal client queries. */
-UNIV_INLINE
-void
-buf_load_throttle_if_needed(
-/*========================*/
-	ulint*	last_check_time,	/*!< in/out: milliseconds since epoch
-					of the last time we did check if
-					throttling is needed, we do the check
-					every srv_io_capacity IO ops. */
-	ulint*	last_activity_count,
-	ulint	n_io)			/*!< in: number of IO ops done since
-					buffer pool load has started */
-{
-	if (n_io % srv_io_capacity < srv_io_capacity - 1) {
-		return;
-	}
-
-	if (*last_check_time == 0 || *last_activity_count == 0) {
-		*last_check_time = ut_time_ms();
-		*last_activity_count = srv_get_activity_count();
-		return;
-	}
-
-	/* srv_io_capacity IO operations have been performed by buffer pool
-	load since the last time we were here. */
-
-	/* If no other activity, then keep going without any delay. */
-	if (srv_get_activity_count() == *last_activity_count) {
-		return;
-	}
-
-	/* There has been other activity, throttle. */
-
-	ulint	now = ut_time_ms();
-	ulint	elapsed_time = now - *last_check_time;
-
-	/* Notice that elapsed_time is not the time for the last
-	srv_io_capacity IO operations performed by BP load. It is the
-	time elapsed since the last time we detected that there has been
-	other activity. This has a small and acceptable deficiency, e.g.:
-	1. BP load runs and there is no other activity.
-	2. Other activity occurs, we run N IO operations after that and
-	   enter here (where 0 <= N < srv_io_capacity).
-	3. last_check_time is very old and we do not sleep at this time, but
-	   only update last_check_time and last_activity_count.
-	4. We run srv_io_capacity more IO operations and call this function
-	   again.
-	5. There has been more other activity and thus we enter here.
-	6. Now last_check_time is recent and we sleep if necessary to prevent
-	   more than srv_io_capacity IO operations per second.
-	The deficiency is that we could have slept at 3., but for this we
-	would have to update last_check_time before the
-	"cur_activity_count == *last_activity_count" check and calling
-	ut_time_ms() that often may turn out to be too expensive. */
-
-	if (elapsed_time < 1000 /* 1 sec (1000 milli secs) */) {
-		std::this_thread::sleep_for(
-			std::chrono::milliseconds(1000 - elapsed_time));
-	}
-
-	*last_check_time = ut_time_ms();
-	*last_activity_count = srv_get_activity_count();
-}
-
-/*****************************************************************//**
 Perform a buffer pool load from the file specified by
 innodb_buffer_pool_filename. If any errors occur then the value of
 innodb_buffer_pool_load_status will be set accordingly, see buf_load_status().
@@ -632,9 +564,6 @@ buf_load()
 		std::sort(dump, dump + dump_n);
 	}
 
-	ulint		last_check_time = 0;
-	ulint		last_activity_cnt = 0;
-
 	/* Avoid calling the expensive fil_space_t::get() for each
 	page within the same tablespace. dump[] is sorted by (space, page),
 	so all pages from a given tablespace are consecutive. */
@@ -708,9 +637,6 @@ buf_load()
 			return;
 		}
 
-		buf_load_throttle_if_needed(
-			&last_check_time, &last_activity_cnt, i);
-
 #ifdef UNIV_DEBUG
 		if ((i+1) >= srv_buf_pool_load_pages_abort) {
 			buf_load_abort_flag = true;
@@ -725,7 +651,7 @@ buf_load()
 	ut_free(dump);
 
 	if (i == dump_n) {
-		os_aio_wait_until_no_pending_reads();
+		os_aio_wait_until_no_pending_reads(true);
 	}
 
 	ut_sprintf_timestamp(now);

@@ -61,9 +61,9 @@ Every change to a contents of a data page must be done
 through mtr_t, and mtr_t::commit() will write log records
 to the InnoDB redo log. */
 
-MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
+alignas(CPU_LEVEL1_DCACHE_LINESIZE)
 static group_commit_lock flush_lock;
-MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE)
+alignas(CPU_LEVEL1_DCACHE_LINESIZE)
 static group_commit_lock write_lock;
 
 /** Redo log system */
@@ -74,52 +74,25 @@ log_t	log_sys;
 #define LOG_BUF_FLUSH_MARGIN	((4 * 4096) /* cf. log_t::append_prepare() */ \
 				 + (4U << srv_page_size_shift))
 
-/** Calculate the recommended highest values for lsn - last_checkpoint_lsn
-and lsn - buf_pool.get_oldest_modification().
-@param[in]	file_size	requested innodb_log_file_size
-@retval true on success
-@retval false if the smallest log group is too small to
-accommodate the number of OS threads in the database server */
-bool
-log_set_capacity(ulonglong file_size)
+void log_t::set_capacity()
 {
-	mysql_mutex_assert_owner(&log_sys.mutex);
-
+#ifndef SUX_LOCK_GENERIC
+	ut_ad(log_sys.latch.is_write_locked());
+#endif
 	/* Margin for the free space in the smallest log, before a new query
 	step which modifies the database, is started */
-	const size_t LOG_CHECKPOINT_FREE_PER_THREAD = 4U
-						      << srv_page_size_shift;
-	const size_t LOG_CHECKPOINT_EXTRA_FREE = 8U << srv_page_size_shift;
 
-	lsn_t		margin;
-	ulint		free;
-
-	lsn_t smallest_capacity = file_size - log_t::START_OFFSET;
+	lsn_t smallest_capacity = srv_log_file_size - log_t::START_OFFSET;
 	/* Add extra safety */
 	smallest_capacity -= smallest_capacity / 10;
 
-	/* For each OS thread we must reserve so much free space in the
-	smallest log group that it can accommodate the log entries produced
-	by single query steps: running out of free log space is a serious
-	system error which requires rebooting the database. */
-
-	free = LOG_CHECKPOINT_FREE_PER_THREAD * 10
-		+ LOG_CHECKPOINT_EXTRA_FREE;
-	if (free >= smallest_capacity / 2) {
-		sql_print_error("InnoDB: innodb_log_file_size is too small."
-				" %s", INNODB_PARAMETERS_MSG);
-		return false;
-	}
-
-	margin = smallest_capacity - free;
-	margin = margin - margin / 10;	/* Add still some extra safety */
+	lsn_t margin = smallest_capacity - (48 << srv_page_size_shift);
+	margin -= margin / 10;	/* Add still some extra safety */
 
 	log_sys.log_capacity = smallest_capacity;
 
 	log_sys.max_modified_age_async = margin - margin / 8;
 	log_sys.max_checkpoint_age = margin;
-
-	return(true);
 }
 
 /** Initialize the redo log subsystem. */
@@ -128,14 +101,8 @@ void log_t::create()
   ut_ad(this == &log_sys);
   ut_ad(!is_initialised());
 
-#if defined(__aarch64__)
-  mysql_mutex_init(log_sys_mutex_key, &mutex, MY_MUTEX_INIT_FAST);
-  mysql_mutex_init(
-    log_flush_order_mutex_key, &flush_order_mutex, MY_MUTEX_INIT_FAST);
-#else
-  mysql_mutex_init(log_sys_mutex_key, &mutex, nullptr);
-  mysql_mutex_init(log_flush_order_mutex_key, &flush_order_mutex, nullptr);
-#endif
+  latch.SRW_LOCK_INIT(log_latch_key);
+  init_lsn_lock();
 
   /* LSN 0 and 1 are reserved; @see buf_page_t::oldest_modification_ */
   lsn.store(FIRST_LSN, std::memory_order_relaxed);
@@ -159,17 +126,12 @@ void log_t::create()
   max_buf_free= buf_size / LOG_BUF_FLUSH_RATIO - LOG_BUF_FLUSH_MARGIN;
   set_check_flush_or_checkpoint();
 
-  n_log_ios_old= n_log_ios;
-  last_printout_time= time(NULL);
-
   last_checkpoint_lsn= FIRST_LSN;
-  n_log_ios= 0;
-  n_log_ios_old= 0;
   log_capacity= 0;
   max_modified_age_async= 0;
   max_checkpoint_age= 0;
   next_checkpoint_lsn= 0;
-  n_pending_checkpoint_writes= 0;
+  checkpoint_pending= false;
 
   buf_free= 0;
 
@@ -180,7 +142,7 @@ dberr_t log_file_t::close() noexcept
 {
   ut_a(is_opened());
 
-  if (!os_file_close(m_file))
+  if (!os_file_close_func(m_file))
     return DB_ERROR;
 
   m_file= OS_FILE_CLOSED;
@@ -190,14 +152,16 @@ dberr_t log_file_t::close() noexcept
 dberr_t log_file_t::read(os_offset_t offset, span<byte> buf) noexcept
 {
   ut_ad(is_opened());
-  return os_file_read(IORequestRead, m_file, buf.data(), offset, buf.size());
+  return os_file_read(IORequestRead, m_file, buf.data(), offset, buf.size(),
+                      nullptr);
 }
 
-dberr_t log_file_t::write(os_offset_t offset, span<const byte> buf) noexcept
+void log_file_t::write(os_offset_t offset, span<const byte> buf) noexcept
 {
   ut_ad(is_opened());
-  return os_file_write(IORequestWrite, "ib_logfile0", m_file,
-                       buf.data(), offset, buf.size());
+  if (dberr_t err= os_file_write(IORequestWrite, "ib_logfile0", m_file,
+                                 buf.data(), offset, buf.size()))
+    ib::fatal() << "write(\"ib_logfile0\") returned " << err;
 }
 
 #ifdef HAVE_PMEM
@@ -213,7 +177,7 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #ifdef HAVE_PMEM
   ut_ad(!buf);
   ut_ad(!flush_buf);
-  if (size && !(size_t(size) & 4095))
+  if (size && !(size_t(size) & 4095) && srv_operation != SRV_OPERATION_BACKUP)
   {
     void *ptr=
       my_mmap(0, size_t(size),
@@ -225,11 +189,16 @@ void log_t::attach(log_file_t file, os_offset_t size)
       struct stat st;
       if (!fstat(log.m_file, &st))
       {
+        MSAN_STAT_WORKAROUND(&st);
         const auto st_dev= st.st_dev;
-        if (!stat("/dev/shm", &st) && st.st_dev == st_dev)
-          ptr= my_mmap(0, size_t(size),
-                       srv_read_only_mode ? PROT_READ : PROT_READ | PROT_WRITE,
-                       MAP_SHARED, log.m_file, 0);
+        if (!stat("/dev/shm", &st))
+        {
+          MSAN_STAT_WORKAROUND(&st);
+          if (st.st_dev == st_dev)
+            ptr= my_mmap(0, size_t(size), srv_read_only_mode
+                         ? PROT_READ : PROT_READ | PROT_WRITE,
+                         MAP_SHARED, log.m_file, 0);
+        }
       }
     }
 #endif /* __linux__ */
@@ -241,6 +210,8 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #if defined __linux__ || defined _WIN32
       set_block_size(CPU_LEVEL1_DCACHE_LINESIZE);
 #endif
+      log_maybe_unbuffered= true;
+      log_buffered= false;
       return;
     }
   }
@@ -252,16 +223,11 @@ void log_t::attach(log_file_t file, os_offset_t size)
 #endif
 
 #if defined __linux__ || defined _WIN32
-  if (!block_size)
-    set_block_size(512);
-# ifdef __linux__
-  else if (srv_file_flush_method != SRV_O_DSYNC)
-    sql_print_information("InnoDB: Buffered log writes (block size=%u bytes)",
-                          block_size);
-#endif
-  else
-    sql_print_information("InnoDB: File system buffers for log"
-                          " disabled (block size=%u bytes)", block_size);
+  sql_print_information("InnoDB: %s (block size=%u bytes)",
+                        log_buffered
+                        ? "Buffered log writes"
+                        : "File system buffers for log disabled",
+                        block_size);
 #endif
 
 #ifdef HAVE_PMEM
@@ -272,7 +238,9 @@ void log_t::attach(log_file_t file, os_offset_t size)
 
 void log_t::create(lsn_t lsn) noexcept
 {
-  mysql_mutex_assert_owner(&mutex);
+#ifndef SUX_LOCK_GENERIC
+  ut_ad(latch.is_write_locked());
+#endif
   ut_ad(!recv_no_log_write);
   ut_ad(is_latest());
   ut_ad(this == &log_sys);
@@ -354,6 +322,62 @@ void log_t::close_file()
     if (const dberr_t err= log.close())
       ib::fatal() << "closing ib_logfile0 failed: " << err;
 }
+
+#if defined __linux__ || defined _WIN32
+/** Acquire all latches that protect the log. */
+static void log_resize_acquire()
+{
+  if (!log_sys.is_pmem())
+  {
+    while (flush_lock.acquire(log_sys.get_lsn() + 1, nullptr) !=
+           group_commit_lock::ACQUIRED);
+    while (write_lock.acquire(log_sys.get_lsn() + 1, nullptr) !=
+           group_commit_lock::ACQUIRED);
+  }
+
+  log_sys.latch.wr_lock(SRW_LOCK_CALL);
+}
+
+/** Release the latches that protect the log. */
+void log_resize_release()
+{
+  log_sys.latch.wr_unlock();
+
+  if (!log_sys.is_pmem())
+  {
+    lsn_t lsn1= write_lock.release(write_lock.value());
+    lsn_t lsn2= flush_lock.release(flush_lock.value());
+    if (lsn1 || lsn2)
+      log_write_up_to(std::max(lsn1, lsn2), true, nullptr);
+  }
+}
+
+/** Try to enable or disable file system caching (update log_buffered) */
+void log_t::set_buffered(bool buffered)
+{
+  if (!log_maybe_unbuffered || is_pmem() || high_level_read_only)
+    return;
+  log_resize_acquire();
+  if (!resize_in_progress() && is_opened() && bool(log_buffered) != buffered)
+  {
+    os_file_close_func(log.m_file);
+    log.m_file= OS_FILE_CLOSED;
+    std::string path{get_log_file_path()};
+    log_buffered= buffered;
+    bool success;
+    log.m_file= os_file_create_func(path.c_str(),
+                                    OS_FILE_OPEN, OS_FILE_NORMAL, OS_LOG_FILE,
+                                    false, &success);
+    ut_a(log.m_file != OS_FILE_CLOSED);
+    sql_print_information("InnoDB: %s (block size=%u bytes)",
+                          log_buffered
+                          ? "Buffered log writes"
+                          : "File system buffers for log disabled",
+                          block_size);
+  }
+  log_resize_release();
+}
+#endif
 
 /** Write an aligned buffer to ib_logfile0.
 @param buf    buffer to be written
@@ -516,7 +540,6 @@ static size_t log_pad(lsn_t lsn, size_t pad, byte *begin, byte *extra)
 inline void log_t::persist(lsn_t lsn) noexcept
 {
   ut_ad(is_pmem());
-  mysql_mutex_assert_not_owner(&mutex);
   ut_ad(!write_lock.is_owner());
   ut_ad(!flush_lock.is_owner());
 
@@ -551,13 +574,16 @@ inline void log_t::persist(lsn_t lsn) noexcept
 }
 #endif
 
-/** Write buf to ib_logfile0 and release mutex.
-@return new write target
-@retval 0 if everything was written */
-inline lsn_t log_t::write_buf() noexcept
+/** Write buf to ib_logfile0.
+@tparam release_latch whether to invoke latch.wr_unlock()
+@return lsn of a callback pending on write_lock
+@retval 0 if everything was written
+*/
+template<bool release_latch> inline lsn_t log_t::write_buf() noexcept
 {
-  mysql_mutex_assert_owner(&mutex);
-
+#ifndef SUX_LOCK_GENERIC
+  ut_ad(latch.is_write_locked());
+#endif
   ut_ad(!srv_read_only_mode);
   ut_ad(!is_pmem());
 
@@ -565,7 +591,8 @@ inline lsn_t log_t::write_buf() noexcept
 
   if (write_lsn >= lsn)
   {
-    mysql_mutex_unlock(&mutex);
+    if (release_latch)
+      latch.wr_unlock();
     ut_ad(write_lsn == lsn);
   }
   else
@@ -574,38 +601,40 @@ inline lsn_t log_t::write_buf() noexcept
     write_lock.set_pending(lsn);
     ut_ad(write_lsn >= get_flushed_lsn());
     const size_t block_size_1{get_block_size() - 1};
-    const lsn_t offset{calc_lsn_offset(write_lsn) & ~block_size_1};
+    const lsn_t offset{calc_lsn_offset(write_lsn) & ~lsn_t{block_size_1}};
 
     DBUG_PRINT("ib_log", ("write " LSN_PF " to " LSN_PF " at " LSN_PF,
                           write_lsn, lsn, offset));
     const byte *write_buf{buf};
     size_t length{buf_free};
     ut_ad(length >= (calc_lsn_offset(write_lsn) & block_size_1));
-    buf_free&= block_size_1;
-    ut_ad(buf_free == ((lsn - first_lsn) & block_size_1));
+    const size_t new_buf_free{length & block_size_1};
+    buf_free= new_buf_free;
+    ut_ad(new_buf_free == ((lsn - first_lsn) & block_size_1));
 
-    if (buf_free)
+    if (new_buf_free)
     {
 #if 0 /* TODO: Pad the last log block with dummy records. */
-      buf_free= log_pad(lsn, get_block_size() - buf_free,
-                        buf + buf_free, flush_buf);
+      buf_free= log_pad(lsn, get_block_size() - new_buf_free,
+                        buf + new_buf_free, flush_buf);
       ... /* TODO: Update the LSN and adjust other code. */
 #else
       /* The rest of the block will be written as garbage.
       (We want to avoid memset() while holding mutex.)
       This block will be overwritten later, once records beyond
       the current LSN are generated. */
-      MEM_MAKE_DEFINED(buf + length, get_block_size() - buf_free);
+      MEM_MAKE_DEFINED(buf + length, get_block_size() - new_buf_free);
       buf[length]= 0; /* allow recovery to catch EOF faster */
       length&= ~block_size_1;
-      memcpy_aligned<16>(flush_buf, buf + length, (buf_free + 15) & ~15);
+      memcpy_aligned<16>(flush_buf, buf + length, (new_buf_free + 15) & ~15);
       length+= get_block_size();
 #endif
     }
 
     std::swap(buf, flush_buf);
     write_to_log++;
-    mysql_mutex_unlock(&mutex);
+    if (release_latch)
+      latch.wr_unlock();
 
     if (UNIV_UNLIKELY(srv_shutdown_state > SRV_SHUTDOWN_INITIATED))
     {
@@ -616,11 +645,6 @@ inline lsn_t log_t::write_buf() noexcept
     /* Do the write to the log file */
     log_write_buf(write_buf, length, offset);
     write_lsn= lsn;
-    if (srv_file_flush_method == SRV_O_DSYNC)
-    {
-      flushed_to_disk_lsn.store(lsn, std::memory_order_release);
-      log_flush_notify(lsn);
-    }
   }
 
   return write_lock.release(lsn);
@@ -630,7 +654,7 @@ inline bool log_t::flush(lsn_t lsn) noexcept
 {
   ut_ad(lsn >= get_flushed_lsn());
   flush_lock.set_pending(lsn);
-  const bool success{log.flush()};
+  const bool success{srv_file_flush_method == SRV_O_DSYNC || log.flush()};
   if (UNIV_LIKELY(success))
   {
     flushed_to_disk_lsn.store(lsn, std::memory_order_release);
@@ -642,14 +666,13 @@ inline bool log_t::flush(lsn_t lsn) noexcept
 /** Ensure that previous log writes are durable.
 @param lsn  previously written LSN
 @return new durable lsn target
-@retval 0   if everything was adequately written */
+@retval 0  if there are no pending callbacks on flush_lock
+           or there is another group commit lead.
+*/
 static lsn_t log_flush(lsn_t lsn)
 {
   ut_ad(!log_sys.is_pmem());
-
-  if (srv_file_flush_method != SRV_O_DSYNC)
-    ut_a(log_sys.flush(lsn));
-
+  ut_a(log_sys.flush(lsn));
   DBUG_EXECUTE_IF("crash_after_log_write_upto", DBUG_SUICIDE(););
   return flush_lock.release(lsn);
 }
@@ -689,32 +712,34 @@ void log_write_up_to(lsn_t lsn, bool durable,
 #endif
 
 repeat:
-  if (durable &&
-      flush_lock.acquire(lsn, callback) != group_commit_lock::ACQUIRED)
-    return;
+  if (durable)
+  {
+    if (flush_lock.acquire(lsn, callback) != group_commit_lock::ACQUIRED)
+      return;
+    flush_lock.set_pending(log_sys.get_lsn());
+  }
+ 
 
-  lsn_t write_lsn;
+  lsn_t pending_write_lsn= 0, pending_flush_lsn= 0;
 
   if (write_lock.acquire(lsn, durable ? nullptr : callback) ==
       group_commit_lock::ACQUIRED)
   {
-    mysql_mutex_lock(&log_sys.mutex);
-    write_lsn= log_sys.write_buf();
+    log_sys.latch.wr_lock(SRW_LOCK_CALL);
+    pending_write_lsn= log_sys.write_buf<true>();
   }
-  else
-    write_lsn= 0;
 
   if (durable)
   {
-    lsn= log_flush(write_lock.value());
-    if (lsn || write_lsn)
-    {
-      /* There is no new group commit lead; some async waiters could stall. */
-      callback= &dummy_callback;
-      if (write_lsn > lsn)
-        lsn= write_lsn;
-      goto repeat;
-    }
+    pending_flush_lsn= log_flush(write_lock.value());
+  }
+
+  if (pending_write_lsn || pending_flush_lsn)
+  {
+    /* There is no new group commit lead; some async waiters could stall. */
+    callback= &dummy_callback;
+    lsn= std::max(pending_write_lsn, pending_flush_lsn);
+    goto repeat;
   }
 }
 
@@ -726,11 +751,9 @@ void log_buffer_flush_to_disk(bool durable)
   log_write_up_to(log_sys.get_lsn(std::memory_order_acquire), durable);
 }
 
-/** Prepare to invoke log_write_and_flush(), before acquiring log_sys.mutex. */
+/** Prepare to invoke log_write_and_flush(), before acquiring log_sys.latch. */
 ATTRIBUTE_COLD void log_write_and_flush_prepare()
 {
-  mysql_mutex_assert_not_owner(&log_sys.mutex);
-
   if (log_sys.is_pmem())
     return;
 
@@ -740,23 +763,18 @@ ATTRIBUTE_COLD void log_write_and_flush_prepare()
          group_commit_lock::ACQUIRED);
 }
 
-/** Durably write the log and release log_sys.mutex */
+/** Durably write the log up to log_sys.get_lsn(). */
 ATTRIBUTE_COLD void log_write_and_flush()
 {
   ut_ad(!srv_read_only_mode);
   if (!log_sys.is_pmem())
   {
-    const lsn_t write_lsn{log_sys.write_buf()};
-    const lsn_t flush_lsn{log_flush(write_lock.value())};
-    if (write_lsn || flush_lsn)
-      log_write_up_to(std::max(write_lsn, flush_lsn), true, &dummy_callback);
+    log_sys.write_buf<false>();
+    log_flush(write_lock.value());
   }
 #ifdef HAVE_PMEM
   else
-  {
-    mysql_mutex_unlock(&log_sys.mutex);
     log_sys.persist(log_sys.get_lsn());
-  }
 #endif
 }
 
@@ -766,11 +784,7 @@ Tries to establish a big enough margin of free space in the log buffer, such
 that a new log entry can be catenated without an immediate need for a flush. */
 ATTRIBUTE_COLD static void log_flush_margin()
 {
-  mysql_mutex_lock(&log_sys.mutex);
-  const bool flush{log_sys.buf_free > log_sys.max_buf_free};
-  mysql_mutex_unlock(&log_sys.mutex);
-
-  if (flush)
+  if (log_sys.buf_free > log_sys.max_buf_free)
     log_buffer_flush_to_disk(false);
 }
 
@@ -783,26 +797,31 @@ ATTRIBUTE_COLD static void log_checkpoint_margin()
 {
   while (log_sys.check_flush_or_checkpoint())
   {
-    mysql_mutex_lock(&log_sys.mutex);
+    log_sys.latch.rd_lock(SRW_LOCK_CALL);
     ut_ad(!recv_no_log_write);
 
     if (!log_sys.check_flush_or_checkpoint())
     {
 func_exit:
-      mysql_mutex_unlock(&log_sys.mutex);
+      log_sys.latch.rd_unlock();
       return;
     }
 
     const lsn_t lsn= log_sys.get_lsn();
     const lsn_t checkpoint= log_sys.last_checkpoint_lsn;
     const lsn_t sync_lsn= checkpoint + log_sys.max_checkpoint_age;
+
     if (lsn <= sync_lsn)
     {
+#ifndef DBUG_OFF
+    skip_checkpoint:
+#endif
       log_sys.set_check_flush_or_checkpoint(false);
       goto func_exit;
     }
 
-    mysql_mutex_unlock(&log_sys.mutex);
+    DBUG_EXECUTE_IF("ib_log_checkpoint_avoid_hard", goto skip_checkpoint;);
+    log_sys.latch.rd_unlock();
 
     /* We must wait to prevent the tail of the log overwriting the head. */
     buf_flush_wait_flushed(std::min(sync_lsn, checkpoint + (1U << 20)));
@@ -825,6 +844,16 @@ ATTRIBUTE_COLD void log_check_margins()
     ut_ad(!recv_no_log_write);
   }
   while (log_sys.check_flush_or_checkpoint());
+}
+
+/** Wait for a log checkpoint if needed.
+NOTE that this function may only be called while not holding
+any synchronization objects except dict_sys.latch. */
+void log_free_check()
+{
+  ut_ad(!lock_sys.is_writer());
+  if (log_sys.check_flush_or_checkpoint())
+    log_check_margins();
 }
 
 extern void buf_resize_shutdown();
@@ -898,13 +927,9 @@ loop:
 	}
 
 	/* We need these threads to stop early in shutdown. */
-	const char* thread_name;
-
-   if (srv_fast_shutdown != 2 && trx_rollback_is_active) {
-		thread_name = "rollback of recovered transactions";
-	} else {
-		thread_name = NULL;
-	}
+	const char* thread_name = srv_fast_shutdown != 2
+		&& trx_rollback_is_active
+		? "rollback of recovered transactions" : nullptr;
 
 	if (thread_name) {
 		ut_ad(!srv_read_only_mode);
@@ -939,38 +964,15 @@ wait_suspend_loop:
 
 	if (!buf_pool.is_initialised()) {
 		ut_ad(!srv_was_started);
-	} else if (ulint pending_io = buf_pool.io_pending()) {
-		if (srv_print_verbose_log && count > 600) {
-			ib::info() << "Waiting for " << pending_io << " buffer"
-				" page I/Os to complete";
-			count = 0;
-		}
-
-		goto loop;
 	} else {
 		buf_flush_buffer_pool();
 	}
 
-	if (log_sys.is_initialised()) {
-		mysql_mutex_lock(&log_sys.mutex);
-		const ulint	n_write	= log_sys.n_pending_checkpoint_writes;
-		mysql_mutex_unlock(&log_sys.mutex);
-
-		if (n_write) {
-			if (srv_print_verbose_log && count > 600) {
-				sql_print_information(
-					"InnoDB: Pending checkpoint writes: "
-					ULINTPF, n_write);
-				count = 0;
-			}
-			goto loop;
-		}
-	}
-
 	if (srv_fast_shutdown == 2 || !srv_was_started) {
 		if (!srv_read_only_mode && srv_was_started) {
-			ib::info() << "Executing innodb_fast_shutdown=2."
-				" Next startup will execute crash recovery!";
+			sql_print_information(
+				"InnoDB: Executing innodb_fast_shutdown=2."
+				" Next startup will execute crash recovery!");
 
 			/* In this fastest shutdown we do not flush the
 			buffer pool:
@@ -995,7 +997,7 @@ wait_suspend_loop:
 			? SIZE_OF_FILE_CHECKPOINT + 8
 			: SIZE_OF_FILE_CHECKPOINT;
 
-		mysql_mutex_lock(&log_sys.mutex);
+		log_sys.latch.rd_lock(SRW_LOCK_CALL);
 
 		lsn = log_sys.get_lsn();
 
@@ -1003,7 +1005,7 @@ wait_suspend_loop:
 			&& lsn != log_sys.last_checkpoint_lsn + sizeof_cp;
 		ut_ad(lsn >= log_sys.last_checkpoint_lsn);
 
-		mysql_mutex_unlock(&log_sys.mutex);
+		log_sys.latch.rd_unlock();
 
 		if (lsn_changed) {
 			goto loop;
@@ -1046,10 +1048,7 @@ log_print(
 /*======*/
 	FILE*	file)	/*!< in: file where to print */
 {
-	double	time_elapsed;
-	time_t	current_time;
-
-	mysql_mutex_lock(&log_sys.mutex);
+	log_sys.latch.rd_lock(SRW_LOCK_CALL);
 
 	const lsn_t lsn= log_sys.get_lsn();
 	mysql_mutex_lock(&buf_pool.flush_list_mutex);
@@ -1066,38 +1065,7 @@ log_print(
 		pages_flushed,
 		lsn_t{log_sys.last_checkpoint_lsn});
 
-	current_time = time(NULL);
-
-	time_elapsed = difftime(current_time,
-				log_sys.last_printout_time);
-
-	if (time_elapsed <= 0) {
-		time_elapsed = 1;
-	}
-
-	fprintf(file,
-		ULINTPF " pending chkp writes\n"
-		ULINTPF " log i/o's done, %.2f log i/o's/second\n",
-		log_sys.n_pending_checkpoint_writes,
-		log_sys.n_log_ios,
-		static_cast<double>(
-			log_sys.n_log_ios - log_sys.n_log_ios_old)
-		/ time_elapsed);
-
-	log_sys.n_log_ios_old = log_sys.n_log_ios;
-	log_sys.last_printout_time = current_time;
-
-	mysql_mutex_unlock(&log_sys.mutex);
-}
-
-/**********************************************************************//**
-Refreshes the statistics used to print per-second averages. */
-void
-log_refresh_stats(void)
-/*===================*/
-{
-	log_sys.n_log_ios_old = log_sys.n_log_ios;
-	log_sys.last_printout_time = time(NULL);
+	log_sys.latch.rd_unlock();
 }
 
 /** Shut down the redo log subsystem. */
@@ -1120,8 +1088,8 @@ void log_t::close()
   ut_ad(!flush_buf);
 #endif
 
-  mysql_mutex_destroy(&mutex);
-  mysql_mutex_destroy(&flush_order_mutex);
+  latch.destroy();
+  destroy_lsn_lock();
 
   recv_sys.close();
 

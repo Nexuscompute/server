@@ -326,8 +326,6 @@ public:
   friend
   bool LEX::resolve_references_to_cte(TABLE_LIST *tables,
                                       TABLE_LIST **tables_last);
-  friend
-  bool LEX::resolve_references_to_cte_in_hanging_cte();
 };
 
 const uint max_number_of_elements_in_with_clause= sizeof(table_map)*8;
@@ -393,10 +391,24 @@ public:
   bool add_with_element(With_element *elem);
 
   /* Add this with clause to the list of with clauses used in the statement */
-  void add_to_list(With_clause ** &last_next)
+  void add_to_list(With_clause **ptr, With_clause ** &last_next)
   {
-    *last_next= this;
-    last_next= &this->next_with_clause;
+    if (embedding_with_clause)
+    {
+      /* 
+        An embedded with clause is always placed before the embedding one
+        in the list of with clauses used in the query.
+      */
+      while (*ptr != embedding_with_clause)
+        ptr= &(*ptr)->next_with_clause;
+      *ptr= this;
+      next_with_clause= embedding_with_clause;
+    }
+    else
+    {
+      *last_next= this;
+      last_next= &this->next_with_clause;
+    }
   }
 
   st_select_lex_unit *get_owner() { return owner; }
@@ -427,9 +439,6 @@ public:
 
   friend
   bool LEX::check_dependencies_in_with_clauses();
-
-  friend
-  bool LEX::resolve_references_to_cte_in_hanging_cte();
 };
 
 inline

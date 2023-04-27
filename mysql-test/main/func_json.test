@@ -9,19 +9,29 @@ select json_value('{"key1":123}', '$.key2');
 select json_value('{"key1":123}', '$.key1');
 select json_value('{"key1":[1,2,3]}', '$.key1');
 select json_value('{"key1": [1,2,3], "key1":123}', '$.key1');
+
+#enable after fix MDEV-27871
+--disable_view_protocol
 select JSON_VALUE('{ "x": [0,1], "y": "[0,1]", "z": "Mon\\\"t\\\"y" }','$.z');
+--enable_view_protocol
 
 select json_query('{"key1":{"a":1, "b":[1,2]}}', '$.key2');
 select json_query('{"key1":{"a":1, "b":[1,2]}}', '$.key1');
 select json_query('{"key1": 1}', '$.key1');
 select json_query('{"key1":123, "key1": [1,2,3]}', '$.key1');
+#enable after fix MDEV-27871
+--disable_view_protocol
 select json_query('{"key1":123, "key1": [1,2,3]}', concat('$', repeat('.k', 1000)));
+--enable_view_protocol
 
 select json_array();
 select json_array(1);
+#enable after fix MDEV-28649
+--disable_view_protocol
 select json_array(1, "text", false, null);
 
 select json_array_append('["a", "b"]', '$', FALSE);
+--enable_view_protocol
 select json_array_append('{"k1":1, "k2":["a", "b"]}', '$.k2', 2);
 select json_array_append('["a", ["b", "c"], "d"]', '$[0]', 2);
 
@@ -29,9 +39,15 @@ select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[1]', 'x');
 select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[2]', 'x');
 select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[3]', 'x');
 select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[4]', 'x');
+#enable after fix MDEV-27871
+--disable_view_protocol
 select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[1].b[0]', 'x');
+--enable_view_protocol
 select json_array_insert('true', '$', 1);
+#enable after fix MDEV-27871
+--disable_view_protocol
 select json_array_insert('["a", {"b": [1, 2]}, [3, 4]]', '$[2][1]', 'y');
+--enable_view_protocol
 
 select json_contains('{"k1":123, "k2":345}', '123', '$.k1');
 select json_contains('"you"', '"you"');
@@ -56,7 +72,10 @@ select json_contains('{"a":1}', '{}');
 select json_contains('[1, {"a":1}]', '{}');
 select json_contains('[1, {"a":1}]', '{"a":1}');
 select json_contains('[{"abc":"def", "def":"abc"}]', '["foo","bar"]');
+#enable after fix MDEV-27871
+--disable_view_protocol
 select json_contains('[{"abc":"def", "def":"abc"}, "bar"]', '["bar", {}]');
+--disable_view_protocol
 select json_contains('[{"a":"b"},{"c":"d"}]','{"c":"d"}');
 
 select json_contains_path('{"key1":1, "key2":[2,3]}', "oNE", "$.key2[1]");
@@ -558,6 +577,21 @@ SELECT
 SELECT JSON_REPLACE( JSON_DETAILED('["x"]'), '$.a', 'xx' );
 
 --echo #
+--echo # MDEV-18284 JSON casting using JSON_COMPACT doesn't always work
+--echo #            with values from subqueries
+--echo #
+
+CREATE TABLE json_test(a JSON, b JSON);
+INSERT INTO json_test VALUES ("[1,2,3]", '{"a":"foo"}');
+SELECT * FROM json_test;
+
+SELECT json_object("a", json_compact(a), "b", b)
+  FROM (SELECT * FROM json_test) AS json_test_values;
+SELECT json_object("a", json_compact(a), "b", json_compact(b))
+  FROM (SELECT * FROM json_test) AS json_test_values;
+DROP TABLE json_test;
+
+--echo #
 --echo # End of 10.2 tests
 --echo #
 
@@ -597,6 +631,40 @@ SELECT JSON_VALID('{"admin\\"": null}'), '{"admin\\"": null}'
     SELECT JSON_VALID('{"\\"admin": null}'), '{"\\"admin": null}'
       UNION
       SELECT JSON_VALID('{"\\"": null}'), '{"\\"": null}';
+
+--echo #
+--echo # MDEV-29188: Crash in JSON_EXTRACT
+--echo #
+
+CREATE TABLE t1 (j JSON);
+
+INSERT INTO t1 VALUES
+  ('{"ID": "4", "Name": "Betty", "Age": 19}'),
+  ('[10, 20, [30, 40]]');
+
+SELECT * FROM t1 WHERE JSON_EXTRACT(j, '$.Age')=19;
+
+drop table t1;
+
+--echo #
+--echo # MDEV-27151: JSON_VALUE() does not parse NULL properties properly
+--echo #
+--echo #
+--echo # It is correct for JSON_EXTRACT() to give null instead of "NULL" because
+--echo # it returns the json literal that is put inside json.
+--echo # Hence it should return null as in 'null' string and not SQL NULL.
+--echo # JSON_VALUE() returns the "VALUE" so it is correct for it to return SQl NULL
+--echo #
+
+SELECT NULL;
+SELECT JSON_VALUE('{"nulltest": null}', '$.nulltest');
+SELECT 1 + NULL;
+SELECT 1 + JSON_VALUE('{"nulltest": null}', '$.nulltest');
+
+
+SELECT NULL;
+SELECT JSON_EXTRACT('{"a":null, "b":10, "c":"null"}', '$.a');
+
 
 --echo #
 --echo # End of 10.3 tests
@@ -750,6 +818,115 @@ SELECT JSON_OBJECTAGG(a) FROM t1;
 DROP TABLE t1;
 
 --echo #
+--echo # MDEV-19160 JSON_DETAILED output unnecessarily verbose
+--echo #
+
+create table t200 (a text);
+
+insert into t200 values
+('{
+  "steps": [
+    {
+      "join_optimization": {
+        "select_id": 1,
+        "steps": [
+          {
+            "rows_estimation": [
+              {
+                "table": "t1",
+                "range_analysis": {
+                  "table_scan": {
+                    "rows": 1000,
+                    "cost": 2e308
+                  },
+                  "potential_range_indexes": [
+                    {
+                      "index": "a_b",
+                      "usable": true,
+                      "key_parts": ["a", "b"]
+                    }
+                  ],
+                  "best_covering_index_scan": {
+                    "index": "a_b",
+                    "cost": 52.195,
+                    "chosen": true
+                  },
+                  "setup_range_conditions": [],
+                  "group_index_range": {
+                    "chosen": false,
+                    "cause": "no group by or distinct"
+                  },
+                  "analyzing_range_alternatives": {
+                    "range_scan_alternatives": [
+                      {
+                        "index": "a_b",
+                        "ranges": ["2 <= a <= 2 AND 4 <= b <= 4", "123"],
+                        "rowid_ordered": true,
+                        "using_mrr": false,
+                        "index_only": true,
+                        "rows": 1,
+                        "cost": 1.1752,
+                        "chosen": true
+                      }
+                    ],
+                    "analyzing_roworder_intersect": {
+                      "cause": "too few roworder scans"
+                    },
+                    "analyzing_index_merge_union": [],
+                    "test_one_line_array":["123"]
+                  },
+                  "chosen_range_access_summary": {
+                    "range_access_plan": {
+                      "type": "range_scan",
+                      "index": "a_b",
+                      "rows": 1,
+                      "ranges": ["2 <= a <= 2 AND 4 <= b <= 4"]
+                    },
+                    "rows_for_plan": 1,
+                    "cost_for_plan": 1.1752,
+                    "chosen": true
+                  }
+                }
+              },
+              {
+                "selectivity_for_indexes": [
+                  {
+                    "index_name": "a_b",
+                    "selectivity_from_index": 0.001
+                  }
+                ],
+                "selectivity_for_columns": [],
+                "cond_selectivity": 0.001
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "join_execution": {
+        "select_id": 1,
+        "steps": []
+      }
+    }
+  ]
+}');
+
+
+select JSON_DETAILED(JSON_EXTRACT(a, '$**.analyzing_range_alternatives')) from t200;
+select JSON_PRETTY(JSON_EXTRACT(a, '$**.analyzing_range_alternatives')) from t200;
+select JSON_LOOSE(JSON_EXTRACT(a, '$**.analyzing_range_alternatives')) from t200;
+drop table t200;
+
+--echo #
+--echo # MDEV-24538: JSON_LENGTH does not return error upon wrong number of parameters
+--echo #
+--error ER_WRONG_PARAMCOUNT_TO_NATIVE_FCT
+SELECT JSON_LENGTH('{"a":"b"}','$','$', 'foo');
+--error ER_WRONG_PARAMCOUNT_TO_NATIVE_FCT
+SELECT JSON_LENGTH();
+
+--echo #
 --echo # End of 10.4 tests
 --echo #
 
@@ -880,6 +1057,38 @@ DROP TABLE t1;
 DROP TABLE t2;
 
 --echo #
+--echo # MDEV-27018 IF and COALESCE lose "json" property
+--echo #
+
+SELECT json_object('a', if(1, json_object('b', 'c'), json_object('e', 'f')));
+SELECT json_object('a', coalesce(json_object('b', 'c')));
+
+--echo #
+--echo # MDEV-26392: Crash with json_get_path_next and 10.5.12
+--echo #
+
+CREATE TABLE arrNestTest (
+    id VARCHAR(80) AS (JSON_COMPACT(JSON_EXTRACT(doc, "$._id"))) UNIQUE KEY,
+    doc JSON, 
+    CONSTRAINT id_not_null CHECK(id IS NOT NULL));
+    
+INSERT INTO test.arrNestTest (doc) VALUES ('{ "_id" : { "$oid" : "611c0a463b150154132f6636" }, "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : [ { "a" : 1.0 } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] } ] }');
+SELECT * FROM arrNestTest;
+DROP TABLE arrNestTest;
+
+--echo #
+--echo # MDEV-30412 JSON_OBJECTAGG doesn't escape double quote in key
+--echo #
+
+SELECT JSON_OBJECTAGG('"', 1);
+SELECT JSON_OBJECTAGG('\"', 1);
+SELECT JSON_OBJECTAGG('\\', 1);
+
+--echo #
+--echo # End of 10.5 tests
+--echo #
+
+--echo #
 --echo # MDEV-26054 Server crashes in Item_func_json_arrayagg::get_str_from_field
 --echo #
 
@@ -891,6 +1100,15 @@ DROP VIEW v;
 DROP TABLE t;
 
 --echo #
---echo # End of 10.5 tests
+--echo # MDEV-29264 JSON functions overflow error based ON LONGTEXT field
 --echo #
+CREATE TABLE t(l1 LONGTEXT, l2 LONGTEXT, l3 LONGTEXT, l4 LONGTEXT);
+INSERT INTO t VALUES('k1', 'v1', 'k2', 'v2');
+SELECT JSON_ARRAY(l1, l2, l3, l4), JSON_OBJECT(l1, l2, l3, l4) from t;
+SELECT JSON_ARRAY_APPEND(JSON_ARRAY(l1, l2, l3, l4), '$[0]', 'k3'), JSON_ARRAY_INSERT(JSON_ARRAY(l1, l2, l3, l4), '$[0]', 'k3') from t;
+SELECT JSON_INSERT(JSON_OBJECT(l1, l2, l3, l4), '$.k3', 'v3'),JSON_SET(JSON_OBJECT(l1, l2, l3, l4), '$.k2', 'new v2'),JSON_REPLACE(JSON_OBJECT(l1, l2, l3, l4), '$.k2', 'new v2') from t;
+DROP TABLE t;
 
+--echo #
+--echo # End of 10.6 tests
+--echo #

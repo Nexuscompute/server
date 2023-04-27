@@ -1,5 +1,5 @@
 # Copyright (c) 2006, 2016, Oracle and/or its affiliates.
-# Copyright (c) 2012, 2021, MariaDB
+# Copyright (c) 2012, 2022, MariaDB
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@ ELSE()
   SET(CFLAGS ${CMAKE_C_FLAGS})
   SET(CXXFLAGS ${CMAKE_CXX_FLAGS})
   SET(MYSQLD_USER "mysql")
+  SET(MYSQLD_GROUP "mysql")
   SET(ini_file_extension "cnf")
   SET(HOSTNAME "uname -n")
 ENDIF()
@@ -50,7 +51,11 @@ ENDIF()
 
 IF(UNIX AND NOT WITHOUT_SERVER)
   SET(prefix ${CMAKE_INSTALL_PREFIX})
-  FOREACH(script mysqld_multi.server mysql-log-rotate binary-configure wsrep_notify mini-benchmark)
+  SET(SCRIPTS mysqld_multi.server mysql-log-rotate binary-configure mini-benchmark)
+  IF(WITH_WSREP)
+    SET(SCRIPTS ${SCRIPTS} wsrep_notify)
+  ENDIF()
+  FOREACH(script ${SCRIPTS})
     CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/${script}.sh
                    ${CMAKE_CURRENT_BINARY_DIR}/${script} @ONLY )
     INSTALL(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/${script}
@@ -79,7 +84,7 @@ IF(UNIX AND NOT WITHOUT_SERVER)
         INSTALL(FILES ${out} DESTINATION ${inst_location}/policy/selinux COMPONENT SupportFiles)
       ENDFOREACH()
       IF(RPM)
-        EXECUTE_PROCESS(COMMAND rpm -q --qf "%{VERSION}" libsepol
+        EXECUTE_PROCESS(COMMAND rpm -q --qf "%{VERSION}" libsepol."${CMAKE_SYSTEM_PROCESSOR}"
                         OUTPUT_VARIABLE LIBSEPOL_VERSION RESULT_VARIABLE err)
         IF (NOT err)
           SET(CPACK_RPM_server_PACKAGE_REQUIRES
@@ -129,7 +134,11 @@ IF(UNIX AND NOT WITHOUT_SERVER)
     COMMAND ${CMAKE_COMMAND} -E create_symlink ./mariadb.service mysqld.service
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
 
-    INSTALL(FILES use_galera_new_cluster.conf
+    IF(WITH_WSREP)
+      INSTALL(FILES use_galera_new_cluster.conf
+              DESTINATION ${inst_location}/systemd COMPONENT SupportFiles)
+    ENDIF()
+    INSTALL(FILES
             ${CMAKE_CURRENT_BINARY_DIR}/mariadb.service
             ${CMAKE_CURRENT_BINARY_DIR}/mysql.service
             ${CMAKE_CURRENT_BINARY_DIR}/mysqld.service

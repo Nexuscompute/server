@@ -31,6 +31,7 @@ defaults=""
 defaults_group_suffix=""
 mysqld_opt=""
 user=""
+group=""
 silent_startup="--silent-startup"
 
 force=0
@@ -96,6 +97,11 @@ Usage: $0 [OPTIONS]
                        user.  You must be root to use this option.  By default
                        mysqld runs using your current login name and files and
                        directories that it creates will be owned by you.
+  --group=group_name   The login group to use for running mysqld.  Files and
+                       directories created by mysqld will be owned by this
+                       group. You must be root to use this option.  By default
+                       mysqld runs using your current group and files and
+                       directories that it creates will be owned by you.
   --extra-file=file    Add user defined SQL file, to be executed following
                        regular database initialization.
 
@@ -145,13 +151,15 @@ parse_arguments()
       --builddir=*) builddir=`parse_arg "$arg"` ;;
       --srcdir=*)  srcdir=`parse_arg "$arg"` ;;
       --ldata=*|--datadir=*|--data=*) ldata=`parse_arg "$arg"` ;;
-      --log-error=*)
+      --log[-_]error=*)
+       # Keep in the arguments passed to the server
+       args="$args $arg"
        log_error=`parse_arg "$arg"` ;;
-      --user=*)
         # Note that the user will be passed to mysqld so that it runs
         # as 'user' (crucial e.g. if log-bin=/some_other_path/
         # where a chown of datadir won't help)
-        user=`parse_arg "$arg"` ;;
+      --user=*) user=`parse_arg "$arg"` ;;
+      --group=*) group=`parse_arg "$arg"` ;;
       --skip-name-resolve) ip_only=1 ;;
       --verbose) verbose=1 ; silent_startup="" ;;
       --rpm) in_rpm=1 ;;
@@ -480,7 +488,12 @@ do
   fi
   if test -n "$user"
   then
-    chown $user "$dir"
+    if test -z "$group"
+    then
+      chown $user $dir
+    else
+      chown $user:$group $dir
+    fi
     if test $? -ne 0
     then
       echo "Cannot change ownership of the database directories to the '$user'"
@@ -513,6 +526,12 @@ then
   fi
   args="$args --user=$user"
 fi
+
+#To be enabled if/when we enable --group as an option to mysqld
+#if test -n "$group"
+#then
+#  args="$args --group=$group"
+#fi
 
 if test -f "$ldata/mysql/user.frm"
 then
@@ -578,6 +597,7 @@ cat_sql()
 s_echo "Installing MariaDB/MySQL system tables in '$ldata' ..."
 if cat_sql | eval "$filter_cmd_line" | mysqld_install_cmd_line > /dev/null
 then
+    printf "@VERSION@-MariaDB" > "$ldata/mysql_upgrade_info"
   s_echo "OK"
 else
   log_file_place=$ldata
@@ -594,17 +614,17 @@ else
   echo
   echo "    shell> $0 --defaults-file=~/.my.cnf"
   echo
-  echo "You can also try to start the mysqld daemon with:"
+  echo "You can also try to start the mariadbd daemon with:"
   echo
   echo "    shell> $mysqld --skip-grant-tables --general-log &"
   echo
   echo "and use the command line tool $bindir/mariadb"
   echo "to connect to the mysql database and look at the grant tables:"
   echo
-  echo "    shell> $bindir/mysql -u root mysql"
-  echo "    mysql> show tables;"
+  echo "    shell> $bindir/mariadb -u root mysql"
+  echo "    MariaDB> show tables;"
   echo
-  echo "Try 'mysqld --help' if you have problems with paths.  Using"
+  echo "Try '$mysqld --help' if you have problems with paths.  Using"
   echo "--general-log gives you a log in $ldata that may be helpful."
   link_to_help
   echo "You can find the latest source at https://downloads.mariadb.org and"
@@ -622,8 +642,8 @@ fi
 if test "$cross_bootstrap" -eq 0 && test -z "$srcdir"
 then
   s_echo
-  s_echo "To start mysqld at boot time you have to copy"
-  s_echo "support-files/mysql.server to the right place for your system"
+  s_echo "To start mariadbd at boot time you have to copy"
+  s_echo "support-files/mariadb.service to the right place for your system"
 
   if test "$auth_root_authentication_method" = normal
   then
@@ -632,7 +652,7 @@ then
     echo "PLEASE REMEMBER TO SET A PASSWORD FOR THE MariaDB root USER !"
     echo "To do so, start the server, then issue the following command:"
     echo
-    echo "'$bindir/mysql_secure_installation'"
+    echo "'$bindir/mariadb-secure-installation'"
     echo
     echo "which will also give you the option of removing the test"
     echo "databases and anonymous user created by default.  This is"
@@ -656,10 +676,10 @@ then
   then
     echo
     echo "You can start the MariaDB daemon with:"
-    echo "cd '$basedir' ; $bindir/mysqld_safe --datadir='$ldata'"
+    echo "cd '$basedir' ; $bindir/mariadb-safe --datadir='$ldata'"
     echo
     echo "You can test the MariaDB daemon with mysql-test-run.pl"
-    echo "cd '$basedir/mysql-test' ; perl mysql-test-run.pl"
+    echo "cd '$basedir/@INSTALL_MYSQLTESTDIR@' ; perl mariadb-test-run.pl"
   fi
 
   echo

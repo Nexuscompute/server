@@ -163,7 +163,7 @@ void Explain_query::query_plan_ready()
   Send EXPLAIN output to the client.
 */
 
-int Explain_query::send_explain(THD *thd)
+int Explain_query::send_explain(THD *thd, bool extended)
 {
   select_result *result;
   LEX *lex= thd->lex;
@@ -176,8 +176,22 @@ int Explain_query::send_explain(THD *thd)
   if (thd->lex->explain_json)
     print_explain_json(result, thd->lex->analyze_stmt);
   else
+  {
     res= print_explain(result, lex->describe, thd->lex->analyze_stmt);
-
+    if (extended)
+    {
+      char buff[1024];
+      String str(buff,(uint32) sizeof(buff), system_charset_info);
+                 str.length(0);
+     /*
+       The warnings system requires input in utf8, @see
+        mysqld_show_warnings().
+     */
+     lex->unit.print(&str, QT_EXPLAIN_EXTENDED);
+                     push_warning(thd, Sql_condition::WARN_LEVEL_NOTE,
+                     ER_YES, str.c_ptr_safe());
+    }
+  }
   if (res)
     result->abort_result_set();
   else
@@ -185,6 +199,7 @@ int Explain_query::send_explain(THD *thd)
 
   return res;
 }
+
 
 
 /*
@@ -606,27 +621,29 @@ void Explain_union::print_explain_json(Explain_query *query,
   else
     writer->add_member("union_result").start_object();
 
-  // using_temporary_table
-  make_union_table_name(table_name_buffer);
-  writer->add_member("table_name").add_str(table_name_buffer);
-  writer->add_member("access_type").add_str("ALL"); // not very useful
-
-  /* r_loops (not present in tabular output) */
-  if (is_analyze)
+  if (using_tmp)
   {
-    writer->add_member("r_loops").add_ll(fake_select_lex_tracker.get_loops());
-  }
+    make_union_table_name(table_name_buffer);
+    writer->add_member("table_name").add_str(table_name_buffer);
+    writer->add_member("access_type").add_str("ALL"); // not very useful
 
-  /* `r_rows` */
-  if (is_analyze)
-  {
-    writer->add_member("r_rows");
-    if (fake_select_lex_tracker.has_scans())
-      writer->add_double(fake_select_lex_tracker.get_avg_rows());
-    else
-      writer->add_null();
-  }
+    /* r_loops (not present in tabular output) */
+    if (is_analyze)
+    {
+      writer->add_member("r_loops").add_ll(
+          fake_select_lex_tracker.get_loops());
+    }
 
+    /* `r_rows` */
+    if (is_analyze)
+    {
+      writer->add_member("r_rows");
+      if (fake_select_lex_tracker.has_scans())
+        writer->add_double(fake_select_lex_tracker.get_avg_rows());
+      else
+        writer->add_null();
+    }
+  }
   writer->add_member("query_specifications").start_array();
 
   for (int i= 0; i < (int) union_members.elements(); i++)
@@ -662,7 +679,11 @@ int Explain_node::print_explain_for_children(Explain_query *query,
   for (int i= 0; i < (int) children.elements(); i++)
   {
     Explain_node *node= query->get_node(children.at(i));
-    if (node->print_explain(query, output, explain_flags, is_analyze))
+    /*
+      Note: node may not be present because for certain kinds of subqueries,
+      the optimizer is not able to see that they were eliminated.
+    */
+    if (node && node->print_explain(query, output, explain_flags, is_analyze))
       return 1;
   }
   return 0;
@@ -706,8 +727,15 @@ void Explain_node::print_explain_json_for_children(Explain_query *query,
   for (int i= 0; i < (int) children.elements(); i++)
   {
     Explain_node *node= query->get_node(children.at(i));
-    /* Derived tables are printed inside Explain_table_access objects */
     
+    /*
+      Note: node may not be present because for certain kinds of subqueries,
+      the optimizer is not able to see that they were eliminated.
+    */
+    if (!node)
+      continue;
+
+    /* Derived tables are printed inside Explain_table_access objects */
     if (!is_connection_printable_in_json(node->connection_type))
       continue;
 
@@ -1680,6 +1708,7 @@ void Explain_rowid_filter::print_explain_json(Explain_query *query,
   if (is_analyze)
   {
     writer->add_member("r_rows").add_double(tracker->get_container_elements());
+    writer->add_member("r_lookups").add_ll(tracker->get_container_lookups());
     writer->add_member("r_selectivity_pct").
       add_double(tracker->get_r_selectivity_pct() * 100.0);
     writer->add_member("r_buffer_size").
@@ -1887,10 +1916,33 @@ void Explain_table_access::print_explain_json(Explain_query *query,
 
     if (is_analyze)
     {
-      //writer->add_member("r_loops").add_ll(jbuf_tracker.get_loops());
+      writer->add_member("r_loops").add_ll(jbuf_loops_tracker.get_loops());
+
       writer->add_member("r_filtered");
       if (jbuf_tracker.has_scans())
         writer->add_double(jbuf_tracker.get_filtered_after_where()*100.0);
+      else
+        writer->add_null();
+
+      writer->add_member("r_unpack_time_ms");
+      writer->add_double(jbuf_unpack_tracker.get_time_ms());
+
+      writer->add_member("r_other_time_ms").
+        add_double(jbuf_extra_time_tracker.get_time_ms());
+      /*
+        effective_rows is average number of matches we got for an incoming
+        row. The row is stored in the join buffer and then is read
+        from there, possibly multiple times. We can't count this number
+        directly. Infer it as:
+         total_number_of_row_combinations_considered / r_loops.
+      */
+      writer->add_member("r_effective_rows");
+      if (jbuf_loops_tracker.has_scans())
+      {
+        double loops= (double)jbuf_loops_tracker.get_loops();
+        double row_combinations= (double)jbuf_tracker.r_rows;
+        writer->add_double(row_combinations / loops);
+      }
       else
         writer->add_null();
     }

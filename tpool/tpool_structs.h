@@ -14,13 +14,12 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111 - 1301 USA*/
 
 #pragma once
+#include <my_global.h>
+#include <my_pthread.h>
 #include <vector>
 #include <stack>
-#include <mutex>
-#include <condition_variable>
 #include <assert.h>
 #include <algorithm>
-
 
 /* Suppress TSAN warnings, that we believe are not critical. */
 #if defined(__has_feature)
@@ -37,94 +36,168 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111 - 1301 USA*/
 #define TPOOL_SUPPRESS_TSAN
 #endif
 
+#ifdef HAVE_PSI_INTERFACE
+typedef unsigned int mysql_pfs_key_t;
+extern mysql_pfs_key_t tpool_cache_mutex_key;
+#endif
+
 namespace tpool
 {
-
-enum cache_notification_mode
-{
-  NOTIFY_ONE,
-  NOTIFY_ALL
-};
 
 /**
   Generic "pointer" cache of a fixed size
   with fast put/get operations.
 
-  Compared to STL containers, is faster/does not
-  do allocations. However, put() operation will wait
-  if there is no free items.
+  Compared to STL containers,e.g stack or queue
+  is faster/does not do allocations.
+
+  However, get() operation will wait if there is no free items.
+
+  We assume that put() will only put back the elements that
+  were retrieved previously with get().
 */
 template<typename T> class cache
 {
-  std::mutex m_mtx;
-  std::condition_variable m_cv;
-  std::vector<T>  m_base;
+  /** Protects updates of m_pos and m_cache members */
+  mysql_mutex_t m_mtx;
+
+  /**
+    Notify waiting threads about "cache full" or "cache not empty" conditions
+    @see get() and wait()
+  */
+  pthread_cond_t m_cv;
+
+  /** Cached items vector.Does not change after construction */
+  std::vector<T> m_base;
+
+  /**
+   Pointers to cached items. Protected by m_mtx. Does not grow after
+   construction. Elements in position [0,m_pos-1] are "borrowed",
+   elements in position [m_pos,capacity()-1] are "free"
+  */
   std::vector<T*> m_cache;
-  cache_notification_mode m_notification_mode;
+
+  /** Number of threads waiting for "cache full" condition (s. wait())
+  Protected by m_mtx */
   int m_waiters;
 
+  /** Current cache size. Protected by m_mtx*/
+  size_t m_pos;
+
+private:
+
+  inline size_t capacity()
+  {
+    return m_base.size();
+  }
+
+  /**
+  @return true if cache is full (no items are borrowed)
+  */
   bool is_full()
   {
-    return m_cache.size() == m_base.size();
+    return m_pos == 0;
+  }
+
+  /**
+  @return true if cache is empty (all items are borrowed)
+  */
+  bool is_empty()
+  {
+    return m_pos == capacity();
   }
 
 public:
-  cache(size_t count, cache_notification_mode mode= tpool::cache_notification_mode::NOTIFY_ALL):
-  m_mtx(), m_cv(), m_base(count),m_cache(count), m_notification_mode(mode),m_waiters()
+  /**
+  Constructor
+  @param size - maximum number of items in cache
+  */
+  cache(size_t size) : m_base(size), m_cache(size),
+    m_waiters(), m_pos(0)
   {
-    for(size_t i = 0 ; i < count; i++)
-      m_cache[i]=&m_base[i];
+    mysql_mutex_init(tpool_cache_mutex_key, &m_mtx, nullptr);
+    pthread_cond_init(&m_cv, nullptr);
+
+    for(size_t i= 0 ; i < size; i++)
+      m_cache[i]= &m_base[i];
   }
 
-  T* get(bool blocking=true)
+  ~cache()
   {
-    std::unique_lock<std::mutex> lk(m_mtx);
-    if (blocking)
-    {
-      while(m_cache.empty())
-        m_cv.wait(lk);
-    }
-    else
-    {
-      if(m_cache.empty())
-        return nullptr;
-    }
-    T* ret = m_cache.back();
-    m_cache.pop_back();
-    return ret;
+    mysql_mutex_destroy(&m_mtx);
+    pthread_cond_destroy(&m_cv);
+ }
+
+  /**
+   Retrieve an item from cache. Waits for free item, if cache is
+   currently empty.
+   @return borrowed item
+  */
+  T* get()
+  {
+    mysql_mutex_lock(&m_mtx);
+    while (is_empty())
+      my_cond_wait(&m_cv, &m_mtx.m_mutex);
+    assert(m_pos < capacity());
+    //  return last element
+    T *t= m_cache[m_pos++];
+    mysql_mutex_unlock(&m_mtx);
+    return t;
   }
 
+  mysql_mutex_t &mutex() { return m_mtx; }
 
+  /**
+   Put back an element to cache.
+   @param ele element to put back
+  */
   void put(T *ele)
   {
-    std::unique_lock<std::mutex> lk(m_mtx);
-    m_cache.push_back(ele);
-    if (m_notification_mode == NOTIFY_ONE)
-      m_cv.notify_one();
-    else if(m_cache.size() == 1)
-      m_cv.notify_all(); // Signal cache is not empty
-    else if(m_waiters && is_full())
-      m_cv.notify_all(); // Signal cache is full
+    mysql_mutex_lock(&m_mtx);
+    assert(!is_full());
+    // put element to the logical end of the array
+    m_cache[--m_pos] = ele;
+
+    /* Notify waiters  when the cache becomes
+     not empty, or when it becomes full */
+    if (m_pos == 1 || (m_waiters && is_full()))
+      pthread_cond_broadcast(&m_cv);
+    mysql_mutex_unlock(&m_mtx);
   }
 
+  /** Check if pointer represents cached element */
   bool contains(T* ele)
   {
-    return ele >= &m_base[0] && ele <= &m_base[m_base.size() -1];
+    // No locking required, m_base does not change after construction.
+    return ele >= &m_base[0] && ele <= &m_base[capacity() - 1];
+  }
+
+  /** Wait until cache is full
+  @param m cache mutex (locked) */
+  void wait(mysql_mutex_t &m)
+  {
+    mysql_mutex_assert_owner(&m);
+    m_waiters++;
+    while (!is_full())
+      my_cond_wait(&m_cv, &m.m_mutex);
+    m_waiters--;
   }
 
   /* Wait until cache is full.*/
   void wait()
   {
-    std::unique_lock<std::mutex> lk(m_mtx);
-    m_waiters++;
-    while(!is_full())
-      m_cv.wait(lk);
-    m_waiters--;
+    mysql_mutex_lock(&m_mtx);
+    wait(m_mtx);
+    mysql_mutex_unlock(&m_mtx);
   }
 
-  TPOOL_SUPPRESS_TSAN size_t size()
+  /**
+   @return approximate number of "borrowed" items.
+   A "dirty" read, not used in any critical functionality.
+  */
+  TPOOL_SUPPRESS_TSAN size_t pos()
   {
-    return m_cache.size();
+    return m_pos;
   }
 };
 

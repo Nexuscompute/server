@@ -1100,6 +1100,21 @@ DEALLOCATE PREPARE stmt;
 --echo #
 
 --echo #
+--echo # Start of 10.3 tests
+--echo #
+
+--echo #
+--echo # MDEV-14983 Wrong error message with SET sql_mode=sha2(ucs2_value)
+--echo #
+
+--error ER_WRONG_VALUE_FOR_VAR
+SET sql_mode=sha2(CONVERT('a' USING ucs2),0);
+
+--echo #
+--echo # End of 10.3 tests
+--echo #
+
+--echo #
 --echo # Start of 10.4 tests
 --echo #
 
@@ -1124,6 +1139,18 @@ SET NAMES utf8, collation_connection=ucs2_bin;
 SELECT IS_IPV6('::');
 SELECT IS_IPV4('10.0.0.1');
 SET NAMES utf8;
+
+--echo #
+--echo # MDEV-30746 Regression in ucs2_general_mysql500_ci
+--echo #
+
+SET NAMES utf8mb3;
+CREATE TABLE t1 (a VARCHAR(32) CHARACTER SET ucs2 COLLATE ucs2_general_mysql500_ci);
+INSERT INTO t1 VALUES ('s'),('z'),(_latin1 0xDF);
+SELECT GROUP_CONCAT(a) FROM t1 GROUP BY a ORDER BY a;
+SELECT a, HEX(a), HEX(WEIGHT_STRING(a)) FROM t1 ORDER BY a;
+DROP TABLE t1;
+
 
 --echo #
 --echo # End of 10.4 tests

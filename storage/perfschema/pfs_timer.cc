@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -167,7 +167,7 @@ void init_timers(void)
 
   /*
     For STAGE and STATEMENT, a timer with a fixed frequency is better.
-    The prefered timer is nanosecond, or lower resolutions.
+    The preferred timer is nanosecond, or lower resolutions.
   */
 
   if (nanosec_to_pico != 0)
@@ -209,7 +209,7 @@ void init_timers(void)
   /*
     For IDLE, a timer with a fixed frequency is critical,
     as the CPU clock may slow down a lot if the server is completely idle.
-    The prefered timer is microsecond, or lower resolutions.
+    The preferred timer is microsecond, or lower resolutions.
   */
 
   if (microsec_to_pico != 0)
@@ -249,7 +249,7 @@ ulonglong get_timer_raw_value(enum_timer_name timer_name)
   case TIMER_NAME_TICK:
     return my_timer_ticks();
   default:
-    DBUG_ASSERT(false);
+    assert(false);
   }
   return 0;
 }
@@ -275,7 +275,7 @@ ulonglong get_timer_raw_value_and_function(enum_timer_name timer_name, timer_fct
     return my_timer_ticks();
   default:
     *fct= NULL;
-    DBUG_ASSERT(false);
+    assert(false);
   }
   return 0;
 }
@@ -303,7 +303,7 @@ ulonglong get_timer_pico_value(enum_timer_name timer_name)
     break;
   default:
     result= 0;
-    DBUG_ASSERT(false);
+    assert(false);
   }
   return result;
 }
@@ -312,8 +312,8 @@ time_normalizer* time_normalizer::get(enum_timer_name timer_name)
 {
   uint index= static_cast<uint> (timer_name);
 
-  DBUG_ASSERT(index >= FIRST_TIMER_NAME);
-  DBUG_ASSERT(index <= LAST_TIMER_NAME);
+  assert(index >= FIRST_TIMER_NAME);
+  assert(index <= LAST_TIMER_NAME);
 
   return & to_pico_data[index];
 }

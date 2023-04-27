@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2007, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2021, MariaDB Corporation.
+Copyright (c) 2015, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -577,6 +577,6 @@ lock_table_has(
 	const dict_table_t*	table,	/*!< in: table */
 	enum lock_mode		mode);	/*!< in: lock mode */
 
-#include "lock0priv.ic"
+#include "lock0priv.inl"
 
 #endif /* lock0priv_h */

@@ -23,6 +23,7 @@
 #include "sql_priv.h"
 #include "rpl_mi.h"
 #include "mysql.h"
+#include <sql_common.h>
 
 class Master_info;
 
@@ -33,7 +34,7 @@ class Repl_semi_sync_slave
   :public Repl_semi_sync_base {
 public:
  Repl_semi_sync_slave() :m_slave_enabled(false) {}
-  ~Repl_semi_sync_slave() {}
+  ~Repl_semi_sync_slave() = default;
 
   void set_trace_level(unsigned long trace_level) {
     m_trace_level = trace_level;

@@ -30,6 +30,7 @@
 #include "wsrep_high_priority_service.h"
 #include "wsrep_storage_service.h"
 #include "wsrep_thd.h"
+#include "wsrep_server_state.h"
 
 #include <string>
 #include <sstream>
@@ -623,9 +624,11 @@ static int init_for_index_scan(TABLE* table, const uchar* key,
  */
 static int end_index_scan(TABLE* table) {
   int error;
-  if ((error= table->file->ha_index_end())) {
-    WSREP_ERROR("Failed to end scan: %d", error);
-    return 1;
+  if (table->file->inited) {
+    if ((error= table->file->ha_index_end())) {
+      WSREP_ERROR("Failed to end scan: %d", error);
+      return 1;
+    }
   }
   return 0;
 }
@@ -651,12 +654,9 @@ static void make_key(TABLE* table, uchar** key, key_part_map* map, int parts) {
 } /* namespace Wsrep_schema_impl */
 
 
-Wsrep_schema::Wsrep_schema()
-{
-}
+Wsrep_schema::Wsrep_schema() = default;
 
-Wsrep_schema::~Wsrep_schema()
-{ }
+Wsrep_schema::~Wsrep_schema() = default;
 
 static void wsrep_init_thd_for_schema(THD *thd)
 {

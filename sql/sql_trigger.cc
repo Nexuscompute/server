@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2004, 2012, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2021, MariaDB
+   Copyright (c) 2010, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -37,6 +37,9 @@
 #include "debug_sync.h"                   // DEBUG_SYNC
 #include "debug.h"                        // debug_crash_here
 #include "mysql/psi/mysql_sp.h"
+#include "wsrep_mysqld.h"
+#include <my_time.h>
+#include <mysql_time.h>
 
 /*************************************************************************/
 
@@ -221,7 +224,7 @@ static File_option triggers_file_parameters[]=
   },
   {
     { STRING_WITH_LEN("created") },
-    my_offsetof(class Table_triggers_list, create_times),
+    my_offsetof(class Table_triggers_list, hr_create_times),
     FILE_OPTIONS_ULLLIST
   },
   { { 0, 0 }, 0, FILE_OPTIONS_STRING }
@@ -313,7 +316,7 @@ class Deprecated_trigger_syntax_handler : public Internal_error_handler
 private:
 
   char m_message[MYSQL_ERRMSG_SIZE];
-  LEX_CSTRING *m_trigger_name;
+  const LEX_CSTRING *m_trigger_name;
 
 public:
 
@@ -329,8 +332,23 @@ public:
     if (sql_errno != EE_OUTOFMEMORY &&
         sql_errno != ER_OUT_OF_RESOURCES)
     {
+      // Check if the current LEX contains a non-empty spname
       if(thd->lex->spname)
         m_trigger_name= &thd->lex->spname->m_name;
+      else if (thd->lex->sphead)
+      {
+        /*
+          Some SP statements, for example IF, create their own local LEX.
+          All LEX instances are available in the LEX stack in sphead::m_lex.
+          Let's find the one that contains a non-zero spname.
+          Note, although a parse error has happened, the LEX instances
+          in sphead::m_lex are not freed yet at this point. The first
+          found non-zero spname contains the valid trigger name.
+        */
+        const sp_name *spname= thd->lex->sphead->find_spname_recursive();
+        if (spname)
+          m_trigger_name= &spname->m_name;
+      }
       if (m_trigger_name)
         my_snprintf(m_message, sizeof(m_message),
                     ER_THD(thd, ER_ERROR_IN_TRIGGER_BODY),
@@ -343,7 +361,7 @@ public:
     return false;
   }
 
-  LEX_CSTRING *get_trigger_name() { return m_trigger_name; }
+  const LEX_CSTRING *get_trigger_name() { return m_trigger_name; }
   char *get_error_message() { return m_message; }
 };
 
@@ -424,6 +442,8 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
   Query_tables_list backup;
   DDL_LOG_STATE ddl_log_state, ddl_log_state_tmp_file;
   char trn_path_buff[FN_REFLEN];
+  char path[FN_REFLEN + 1];
+
   DBUG_ENTER("mysql_create_or_drop_trigger");
 
   /* Charset of the buffer for statement must be system one. */
@@ -553,8 +573,12 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
   /* We should have only one table in table list. */
   DBUG_ASSERT(tables->next_global == 0);
 
-  /* We do not allow creation of triggers on temporary tables. */
-  if (create && thd->find_tmp_table_share(tables))
+  build_table_filename(path, sizeof(path) - 1, tables->db.str, tables->alias.str, ".frm", 0);
+  tables->required_type= dd_frm_type(NULL, path, NULL, NULL, NULL);
+
+  /* We do not allow creation of triggers on temporary tables or sequence. */
+  if (tables->required_type == TABLE_TYPE_SEQUENCE ||
+      (create && thd->find_tmp_table_share(tables)))
   {
     my_error(ER_TRG_ON_VIEW_OR_TEMP_TABLE, MYF(0), tables->alias.str);
     goto end;
@@ -622,7 +646,7 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
       goto end;
   }
 
-#ifdef WITH_WSREP
+#if defined WITH_WSREP && defined ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("sync.mdev_20225",
                   {
                     const char act[]=
@@ -631,7 +655,7 @@ bool mysql_create_or_drop_trigger(THD *thd, TABLE_LIST *tables, bool create)
                     DBUG_ASSERT(!debug_sync_set_action(thd,
                                                        STRING_WITH_LEN(act)));
                   };);
-#endif /* WITH_WSREP */
+#endif /* WITH_WSREP && ENABLED_DEBUG_SYNC */
 
   if (create)
     result= table->triggers->create_trigger(thd, tables, &stmt_query,
@@ -1035,6 +1059,10 @@ bool Table_triggers_list::create_trigger(THD *thd, TABLE_LIST *tables,
   if (!(trigger= new (&table->mem_root) Trigger(this, 0)))
     goto err;
 
+  /* Time with in microseconds */
+  trigger->hr_create_time= make_hr_time(thd->query_start(),
+                                        thd->query_start_sec_part());
+
   /* Create trigger_name.TRN file to ensure trigger name is unique */
   if (sql_create_definition_file(NULL, &trigname_file, &trigname_file_type,
                                  (uchar*)&trigname, trigname_file_parameters))
@@ -1047,8 +1075,6 @@ bool Table_triggers_list::create_trigger(THD *thd, TABLE_LIST *tables,
   /* Populate the trigger object */
 
   trigger->sql_mode= thd->variables.sql_mode;
-  /* Time with 2 decimals, like in MySQL 5.7 */
-  trigger->create_time= ((ulonglong) thd->query_start())*100 + thd->query_start_sec_part()/10000;
   build_trig_stmt_query(thd, tables, stmt_query, &trigger_definition,
                         &trigger->definer, trg_definer_holder);
 
@@ -1116,7 +1142,7 @@ void Table_triggers_list::empty_lists()
   client_cs_names.empty();
   connection_cl_names.empty();
   db_cl_names.empty();
-  create_times.empty();
+  hr_create_times.empty();
 }
 
 
@@ -1152,7 +1178,7 @@ bool Trigger::add_to_file_list(void* param_arg)
       base->client_cs_names.push_back(&client_cs_name, mem_root) ||
       base->connection_cl_names.push_back(&connection_cl_name, mem_root) ||
       base->db_cl_names.push_back(&db_cl_name, mem_root) ||
-      base->create_times.push_back(&create_time, mem_root))
+      base->hr_create_times.push_back(&hr_create_time.val, mem_root))
     return 1;
   return 0;
 }
@@ -1562,7 +1588,8 @@ bool Table_triggers_list::check_n_load(THD *thd, const LEX_CSTRING *db,
       List_iterator_fast<LEX_CSTRING> it_client_cs_name(trigger_list->client_cs_names);
       List_iterator_fast<LEX_CSTRING> it_connection_cl_name(trigger_list->connection_cl_names);
       List_iterator_fast<LEX_CSTRING> it_db_cl_name(trigger_list->db_cl_names);
-      List_iterator_fast<ulonglong> it_create_times(trigger_list->create_times);
+      List_iterator_fast<ulonglong>
+        it_create_times(trigger_list->hr_create_times);
       LEX *old_lex= thd->lex;
       LEX lex;
       sp_rcontext *save_spcont= thd->spcont;
@@ -1648,7 +1675,13 @@ bool Table_triggers_list::check_n_load(THD *thd, const LEX_CSTRING *db,
 
         trigger->sql_mode= sql_mode;
         trigger->definition= *trg_create_str;
-        trigger->create_time= trg_create_time ? *trg_create_time : 0;
+        trigger->hr_create_time.val= trg_create_time ? *trg_create_time : 0;
+        /*
+          Fix time if in 100th of second (comparison with max uint * 100
+          (max possible timestamp in the old format))
+        */
+        if (trigger->hr_create_time.val < 429496729400ULL)
+          trigger->hr_create_time.val*= 10000;
         trigger->name= sp ? sp->m_name : empty_clex_str;
         trigger->on_table_name.str= (char*) lex.raw_trg_on_table_name_begin;
         trigger->on_table_name.length= (lex.raw_trg_on_table_name_end -
@@ -1669,7 +1702,7 @@ bool Table_triggers_list::check_n_load(THD *thd, const LEX_CSTRING *db,
 
         if (unlikely(parse_error))
         {
-          LEX_CSTRING *name;
+          const LEX_CSTRING *name;
 
           /*
             In case of errors, disable all triggers for the table, but keep

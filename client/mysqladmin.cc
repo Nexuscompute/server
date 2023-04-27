@@ -15,7 +15,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
-/* maintaince of mysql databases */
+/* maintenance of mysql databases */
 
 #include "client_priv.h"
 #include <signal.h>
@@ -1600,7 +1600,8 @@ static void print_relative_row_vert(MYSQL_RES *result __attribute__((unused)),
 	 llstr((tmp - last_values[row]), buff));
 
   /* Find the minimum row length needed to output the relative value */
-  if ((length=(uint) strlen(buff) > ex_val_max_len[row]) && ex_status_printed)
+  length=(uint) strlen(buff);
+  if (length > ex_val_max_len[row] && ex_status_printed)
     ex_val_max_len[row] = length;
   last_values[row] = tmp;
 }

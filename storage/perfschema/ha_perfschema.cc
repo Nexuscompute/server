@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -238,8 +238,7 @@ ha_perfschema::ha_perfschema(handlerton *hton, TABLE_SHARE *share)
   : handler(hton, share), m_table_share(NULL), m_table(NULL)
 {}
 
-ha_perfschema::~ha_perfschema()
-{}
+ha_perfschema::~ha_perfschema() = default;
 
 int ha_perfschema::open(const char *name, int mode, uint test_if_locked)
 {
@@ -320,8 +319,8 @@ int ha_perfschema::rnd_init(bool scan)
   int result;
   DBUG_ENTER("ha_perfschema::rnd_init");
 
-  DBUG_ASSERT(m_table_share);
-  DBUG_ASSERT(m_table_share->m_open_table != NULL);
+  assert(m_table_share);
+  assert(m_table_share->m_open_table != NULL);
 
   stats.records= 0;
   if (m_table == NULL)
@@ -339,7 +338,7 @@ int ha_perfschema::rnd_init(bool scan)
 int ha_perfschema::rnd_end(void)
 {
   DBUG_ENTER("ha_perfschema::rnd_end");
-  DBUG_ASSERT(m_table);
+  assert(m_table);
   delete m_table;
   m_table= NULL;
   DBUG_RETURN(0);
@@ -371,7 +370,7 @@ void ha_perfschema::position(const uchar *record)
 {
   DBUG_ENTER("ha_perfschema::position");
 
-  DBUG_ASSERT(m_table);
+  assert(m_table);
   m_table->get_position(ref);
   DBUG_VOID_RETURN;
 }
@@ -396,7 +395,7 @@ int ha_perfschema::rnd_pos(uchar *buf, uchar *pos)
 int ha_perfschema::info(uint flag)
 {
   DBUG_ENTER("ha_perfschema::info");
-  DBUG_ASSERT(m_table_share);
+  assert(m_table_share);
   if (flag & HA_STATUS_VARIABLE)
     stats.records= m_table_share->get_row_count();
   if (flag & HA_STATUS_CONST)
@@ -415,7 +414,7 @@ int ha_perfschema::delete_all_rows(void)
   if (is_executed_by_slave())
     DBUG_RETURN(0);
 
-  DBUG_ASSERT(m_table_share);
+  assert(m_table_share);
   if (m_table_share->m_delete_all_rows)
     result= m_table_share->m_delete_all_rows();
   else
@@ -444,6 +443,53 @@ THR_LOCK_DATA **ha_perfschema::store_lock(THD *thd,
 int ha_perfschema::delete_table(const char *name)
 {
   DBUG_ENTER("ha_perfschema::delete_table");
+
+  /*
+    The name string looks like:
+    "./performance_schema/processlist"
+
+    Make a copy of it, parse the '/' to
+    isolate the schema and table name.
+  */
+
+  char table_path[FN_REFLEN+1];
+  strncpy(table_path, name, sizeof(table_path));
+  table_path[FN_REFLEN]='\0';
+
+  char *ptr;
+  char *table_name;
+  char *db_name;
+  const PFS_engine_table_share *share;
+
+  /* Start scan from the end. */
+  ptr = strend(table_path) - 1;
+
+  /* Find path separator */
+  while ((ptr >= table_path) && (*ptr != '\\') && (*ptr != '/')) {
+    ptr--;
+  }
+
+  table_name = ptr + 1;
+  *ptr = '\0';
+
+  /* Find path separator */
+  while ((ptr >= table_path) && (*ptr != '\\') && (*ptr != '/')) {
+    ptr--;
+  }
+
+  db_name = ptr + 1;
+
+  share = find_table_share(db_name, table_name);
+  if (share != NULL) {
+    if (share->m_optional) {
+      /*
+        An optional table is deleted,
+        disarm the checked flag so we don't trust it any more.
+      */
+      share->m_state->m_checked = false;
+    }
+  }
+
   DBUG_RETURN(0);
 }
 

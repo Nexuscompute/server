@@ -1,5 +1,5 @@
-/* Copyright 2008-2021 Codership Oy <http://www.codership.com>
-   Copyright (c) 2020, 2021, MariaDB
+/* Copyright (c) 2008, 2022 Codership Oy <http://www.codership.com>
+   Copyright (c) 2020, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -125,6 +125,7 @@ ulong wsrep_trx_fragment_unit= WSREP_FRAG_BYTES;
 ulong wsrep_SR_store_type= WSREP_SR_STORE_TABLE;
 uint  wsrep_ignore_apply_errors= 0;
 
+std::atomic <bool> wsrep_thread_create_failed;
 
 /*
  * End configuration options
@@ -325,7 +326,6 @@ void WSREP_LOG(void (*fun)(const char* fmt, ...), const char* fmt, ...)
 
 wsrep_uuid_t               local_uuid       = WSREP_UUID_UNDEFINED;
 wsrep_seqno_t              local_seqno      = WSREP_SEQNO_UNDEFINED;
-wsp::node_status           local_status;
 
 /*
  */
@@ -362,10 +362,12 @@ static void wsrep_log_cb(wsrep::log::level level,
 void wsrep_init_gtid()
 {
   wsrep_server_gtid_t stored_gtid= wsrep_get_SE_checkpoint<wsrep_server_gtid_t>();
+  // Domain id may have changed, use the one
+  // received during state transfer.
+  stored_gtid.domain_id= wsrep_gtid_server.domain_id;
   if (stored_gtid.server_id == 0)
   {
     rpl_gtid wsrep_last_gtid;
-    stored_gtid.domain_id= wsrep_gtid_server.domain_id;
     if (mysql_bin_log.is_open() &&
         mysql_bin_log.lookup_domain_in_binlog_state(stored_gtid.domain_id,
                                                     &wsrep_last_gtid))
@@ -470,19 +472,20 @@ void wsrep_recover_sr_from_storage(THD *orig_thd)
     if (!wsrep_schema)
     {
       WSREP_ERROR("Wsrep schema not initialized when trying to recover "
-                  "streaming transactions");
-      unireg_abort(1);
+                  "streaming transactions: wsrep_on %d", WSREP_ON);
+      trans_commit(orig_thd);
     }
     if (wsrep_schema->recover_sr_transactions(orig_thd))
     {
-      WSREP_ERROR("Failed to recover SR transactions from schema");
-      unireg_abort(1);
+      WSREP_ERROR("Failed to recover SR transactions from schema: wsrep_on : %d", WSREP_ON);
+      trans_commit(orig_thd);
     }
     break;
   default:
     /* */
-    WSREP_ERROR("Unsupported wsrep SR store type: %lu", wsrep_SR_store_type);
-    unireg_abort(1);
+    WSREP_ERROR("Unsupported wsrep SR store type: %lu wsrep_on: %d",
+                wsrep_SR_store_type, WSREP_ON);
+    trans_commit(orig_thd);
     break;
   }
 }
@@ -649,7 +652,7 @@ static std::string wsrep_server_incoming_address()
     bool is_ipv6= false;
     unsigned int my_bind_ip= INADDR_ANY; // default if not set
 
-    if (my_bind_addr_str && strlen(my_bind_addr_str) && 
+    if (my_bind_addr_str && strlen(my_bind_addr_str) &&
         strcmp(my_bind_addr_str, "*") != 0)
     {
       my_bind_ip= wsrep_check_ip(my_bind_addr_str, &is_ipv6);
@@ -708,15 +711,22 @@ static std::string wsrep_server_incoming_address()
     /*
       In case port is not specified in wsrep_node_incoming_address, we use
       mysqld_port.
+      Note that we might get here before we execute set_ports().
     */
-    int port= (addr.get_port() > 0) ? addr.get_port() : (int) mysqld_port;
+    int local_port= (addr.get_port() > 0) ? addr.get_port() : (int) mysqld_port;
+    if (!local_port)
+      local_port= MYSQL_PORT;
     const char *fmt= (addr.is_ipv6()) ? "[%s]:%u" : "%s:%u";
 
-    snprintf(inc_addr, inc_addr_max, fmt, addr.get_address(), port);
+    snprintf(inc_addr, inc_addr_max, fmt, addr.get_address(), local_port);
   }
-  
+
  done:
-  ret= wsrep_node_incoming_address;
+  if (!strlen(inc_addr))
+    ret= wsrep_node_incoming_address;
+  else
+    ret= inc_addr;
+  WSREP_DEBUG("wsrep_incoming_address = %s", ret.c_str());
   return ret;
 }
 
@@ -800,7 +810,6 @@ int wsrep_init_server()
 
 void wsrep_init_globals()
 {
-  wsrep_gtid_server.domain_id= wsrep_gtid_domain_id;
   wsrep_init_sidno(Wsrep_server_state::instance().connected_gtid().id());
   /* Recover last written wsrep gtid */
   wsrep_init_gtid();
@@ -814,6 +823,13 @@ void wsrep_init_globals()
     /* Try to search for domain_id and server_id combination in binlog if found continue from last seqno */
     wsrep_get_binlog_gtid_seqno(new_gtid);
     wsrep_gtid_server.gtid(new_gtid);
+  }
+  else
+  {
+    if (wsrep_gtid_mode && wsrep_gtid_server.server_id != global_system_variables.server_id)
+    {
+      WSREP_WARN("Ignoring server id for non bootstrap node.");
+    }
   }
   wsrep_init_schema();
   if (WSREP_ON)
@@ -977,13 +993,19 @@ void wsrep_init_startup (bool sst_first)
     With mysqldump SST (!sst_first) wait until the server reaches
     joiner state and procedd to accepting connections.
   */
+  int err= 0;
   if (sst_first)
   {
-    server_state.wait_until_state(Wsrep_server_state::s_initializing);
+    err= server_state.wait_until_state(Wsrep_server_state::s_initializing);
   }
   else
   {
-    server_state.wait_until_state(Wsrep_server_state::s_joiner);
+    err= server_state.wait_until_state(Wsrep_server_state::s_joiner);
+  }
+  if (err)
+  {
+    WSREP_ERROR("Wsrep startup was interrupted");
+    unireg_abort(1);
   }
 }
 
@@ -1088,7 +1110,11 @@ void wsrep_stop_replication(THD *thd)
   {
     WSREP_DEBUG("Disconnect provider");
     Wsrep_server_state::instance().disconnect();
-    Wsrep_server_state::instance().wait_until_state(Wsrep_server_state::s_disconnected);
+    if (Wsrep_server_state::instance().wait_until_state(
+            Wsrep_server_state::s_disconnected))
+    {
+      WSREP_WARN("Wsrep interrupted while waiting for disconnected state");
+    }
   }
 
   /* my connection, should not terminate with wsrep_close_client_connection(),
@@ -1110,7 +1136,11 @@ void wsrep_shutdown_replication()
   {
     WSREP_DEBUG("Disconnect provider");
     Wsrep_server_state::instance().disconnect();
-    Wsrep_server_state::instance().wait_until_state(Wsrep_server_state::s_disconnected);
+    if (Wsrep_server_state::instance().wait_until_state(
+            Wsrep_server_state::s_disconnected))
+    {
+      WSREP_WARN("Wsrep interrupted while waiting for disconnected state");
+    }
   }
 
   wsrep_close_client_connections(TRUE);
@@ -1139,6 +1169,15 @@ bool wsrep_start_replication(const char *wsrep_cluster_address)
   }
 
   DBUG_ASSERT(wsrep_cluster_address[0]);
+
+  // --wsrep-new-cluster flag is not used, checking wsrep_cluster_address
+  // it should match gcomm:// only to be considered as bootstrap node.
+  // This logic is used in galera.
+  if (!wsrep_new_cluster && (strlen(wsrep_cluster_address) == 8) &&
+      !strncmp(wsrep_cluster_address, "gcomm://", 8))
+  {
+    wsrep_new_cluster= true;
+  }
 
   bool const bootstrap(TRUE == wsrep_new_cluster);
 
@@ -1580,6 +1619,73 @@ wsrep_sync_wait_upto (THD*          thd,
   return ret;
 }
 
+bool wsrep_is_show_query(enum enum_sql_command command)
+{
+  DBUG_ASSERT(command >= 0 && command <= SQLCOM_END);
+  return (sql_command_flags[command] & CF_STATUS_COMMAND) != 0;
+}
+
+static bool wsrep_is_diagnostic_query(enum enum_sql_command command)
+{
+  assert(command >= 0 && command <= SQLCOM_END);
+  return (sql_command_flags[command] & CF_DIAGNOSTIC_STMT) != 0;
+}
+
+static enum enum_wsrep_sync_wait
+wsrep_sync_wait_mask_for_command(enum enum_sql_command command)
+{
+  switch (command)
+  {
+  case SQLCOM_SELECT:
+  case SQLCOM_CHECKSUM:
+    return WSREP_SYNC_WAIT_BEFORE_READ;
+  case SQLCOM_DELETE:
+  case SQLCOM_DELETE_MULTI:
+  case SQLCOM_UPDATE:
+  case SQLCOM_UPDATE_MULTI:
+    return WSREP_SYNC_WAIT_BEFORE_UPDATE_DELETE;
+  case SQLCOM_REPLACE:
+  case SQLCOM_INSERT:
+  case SQLCOM_REPLACE_SELECT:
+  case SQLCOM_INSERT_SELECT:
+    return WSREP_SYNC_WAIT_BEFORE_INSERT_REPLACE;
+  default:
+    if (wsrep_is_diagnostic_query(command))
+    {
+      return WSREP_SYNC_WAIT_NONE;
+    }
+    if (wsrep_is_show_query(command))
+    {
+      switch (command)
+      {
+      case SQLCOM_SHOW_PROFILE:
+      case SQLCOM_SHOW_PROFILES:
+      case SQLCOM_SHOW_SLAVE_HOSTS:
+      case SQLCOM_SHOW_RELAYLOG_EVENTS:
+      case SQLCOM_SHOW_SLAVE_STAT:
+      case SQLCOM_SHOW_BINLOG_STAT:
+      case SQLCOM_SHOW_ENGINE_STATUS:
+      case SQLCOM_SHOW_ENGINE_MUTEX:
+      case SQLCOM_SHOW_ENGINE_LOGS:
+      case SQLCOM_SHOW_PROCESSLIST:
+      case SQLCOM_SHOW_PRIVILEGES:
+        return WSREP_SYNC_WAIT_NONE;
+      default:
+        return WSREP_SYNC_WAIT_BEFORE_SHOW;
+      }
+    }
+  }
+  return WSREP_SYNC_WAIT_NONE;
+}
+
+bool wsrep_sync_wait(THD* thd, enum enum_sql_command command)
+{
+  bool res = false;
+  if (WSREP_CLIENT(thd) && thd->variables.wsrep_sync_wait)
+    res = wsrep_sync_wait(thd, wsrep_sync_wait_mask_for_command(command));
+  return res;
+}
+
 void wsrep_keys_free(wsrep_key_arr_t* key_arr)
 {
     for (size_t i= 0; i < key_arr->keys_len; ++i)
@@ -1605,20 +1711,29 @@ wsrep_append_fk_parent_table(THD* thd, TABLE_LIST* tables, wsrep::key_array* key
     TABLE_LIST *table;
     TABLE_LIST *table_last_in_list;
 
+    for (table= tables; table; table= table->next_local)
+    {
+      if (is_temporary_table(table))
+      {
+        WSREP_DEBUG("Temporary table %s.%s already opened query=%s", table->db.str,
+                    table->table_name.str, wsrep_thd_query(thd));
+	return false;
+      }
+    }
+
     thd->release_transactional_locks();
     uint counter;
     MDL_savepoint mdl_savepoint= thd->mdl_context.mdl_savepoint();
 
-    for (table_last_in_list= tables;;table_last_in_list= table_last_in_list->next_local) {
+    for (table_last_in_list= tables;;table_last_in_list= table_last_in_list->next_local)    {
       if (!table_last_in_list->next_local) {
         break;
       }
     }
 
-    if (thd->open_temporary_tables(tables) ||
-         open_tables(thd, &tables, &counter, MYSQL_OPEN_FORCE_SHARED_HIGH_PRIO_MDL))
+    if (open_tables(thd, &tables, &counter, MYSQL_OPEN_FORCE_SHARED_HIGH_PRIO_MDL))
     {
-      WSREP_DEBUG("unable to open table for FK checks for %s", thd->query());
+      WSREP_DEBUG("Unable to open table for FK checks for %s", wsrep_thd_query(thd));
       fail= true;
       goto exit;
     }
@@ -2591,7 +2706,7 @@ static int wsrep_TOI_begin(THD *thd, const char *db, const char *table,
                  ret,
                  (thd->db.str ? thd->db.str : "(null)"),
                  wsrep_thd_query(thd));
-      my_error(ER_ERROR_DURING_COMMIT, MYF(0), WSREP_SIZE_EXCEEDED);
+      my_error(ER_UNKNOWN_ERROR, MYF(0), "Maximum writeset size exceeded");
       break;
     case wsrep::e_deadlock_error:
       WSREP_WARN("TO isolation failed for: %d, schema: %s, sql: %s. "
@@ -2764,6 +2879,12 @@ int wsrep_to_isolation_begin(THD *thd, const char *db_, const char *table_,
                   wsrep_thd_query(thd));
 
     return 0;
+  }
+
+  if (thd->wsrep_parallel_slave_wait_for_prior_commit())
+  {
+    WSREP_WARN("TOI: wait_for_prior_commit() returned error.");
+    return -1;
   }
 
   int ret= 0;
@@ -2973,6 +3094,11 @@ void wsrep_handle_mdl_conflict(MDL_context *requestor_ctx,
       THD_STAGE_INFO(request_thd, stage_waiting_ddl);
       ticket->wsrep_report(wsrep_debug);
       mysql_mutex_unlock(&granted_thd->LOCK_thd_data);
+      if (granted_thd->current_backup_stage != BACKUP_FINISHED &&
+	  wsrep_check_mode(WSREP_MODE_BF_MARIABACKUP))
+      {
+	wsrep_abort_thd(request_thd, granted_thd, 1);
+      }
     }
     else if (request_thd->lex->sql_command == SQLCOM_DROP_TABLE)
     {
@@ -3062,7 +3188,9 @@ static my_bool have_client_connections(THD *thd, void*)
 {
   DBUG_PRINT("quit",("Informing thread %lld that it's time to die",
                      (longlong) thd->thread_id));
-  if (is_client_connection(thd) && thd->killed == KILL_CONNECTION)
+  if (is_client_connection(thd) &&
+      (thd->killed == KILL_CONNECTION ||
+       thd->killed == KILL_CONNECTION_HARD))
   {
     (void)abort_replicated(thd);
     return 1;
@@ -3072,7 +3200,7 @@ static my_bool have_client_connections(THD *thd, void*)
 
 static void wsrep_close_thread(THD *thd)
 {
-  thd->set_killed(KILL_CONNECTION);
+  thd->set_killed(KILL_CONNECTION_HARD);
   MYSQL_CALLBACK(thread_scheduler, post_kill_notification, (thd));
   mysql_mutex_lock(&thd->LOCK_thd_kill);
   thd->abort_current_cond_wait(true);
@@ -3106,13 +3234,13 @@ static my_bool kill_all_threads(THD *thd, THD *caller_thd)
   if (is_client_connection(thd) && thd != caller_thd)
   {
     if (is_replaying_connection(thd))
-      thd->set_killed(KILL_CONNECTION);
+      thd->set_killed(KILL_CONNECTION_HARD);
     else if (!abort_replicated(thd))
     {
       /* replicated transactions must be skipped */
       WSREP_DEBUG("closing connection %lld", (longlong) thd->thread_id);
       /* instead of wsrep_close_thread() we do now  soft kill by THD::awake */
-      thd->awake(KILL_CONNECTION);
+      thd->awake(KILL_CONNECTION_HARD);
     }
   }
   return 0;
@@ -3296,11 +3424,6 @@ extern  bool wsrep_thd_ignore_table(THD *thd)
   return thd->wsrep_ignore_table;
 }
 
-bool wsrep_is_show_query(enum enum_sql_command command)
-{
-  DBUG_ASSERT(command >= 0 && command <= SQLCOM_END);
-  return (sql_command_flags[command] & CF_STATUS_COMMAND) != 0;
-}
 bool wsrep_create_like_table(THD* thd, TABLE_LIST* table,
                              TABLE_LIST* src_table,
                              HA_CREATE_INFO *create_info)
@@ -3318,21 +3441,17 @@ bool wsrep_create_like_table(THD* thd, TABLE_LIST* table,
   }
   else
   {
-    /* here we have CREATE TABLE LIKE <temporary table>
-       the temporary table definition will be needed in slaves to
-       enable the create to succeed
-     */
-    TABLE_LIST tbl;
-    bzero((void*) &tbl, sizeof(tbl));
-    tbl.db= src_table->db;
-    tbl.table_name= tbl.alias= src_table->table_name;
-    tbl.table= src_table->table;
+    /* Non-MERGE tables ignore this call. */
+    if (src_table->table->file->extra(HA_EXTRA_ADD_CHILDREN_LIST))
+      return (true);
+
     char buf[2048];
     String query(buf, sizeof(buf), system_charset_info);
     query.length(0);  // Have to zero it since constructor doesn't
 
-    (void)  show_create_table(thd, &tbl, &query, NULL, WITH_DB_NAME);
-    WSREP_DEBUG("TMP TABLE: %s", query.ptr());
+    int result __attribute__((unused))=
+      show_create_table(thd, src_table, &query, NULL, WITH_DB_NAME);
+    WSREP_DEBUG("TMP TABLE: %s ret_code %d", query.ptr(), result);
 
     thd->wsrep_TOI_pre_query=     query.ptr();
     thd->wsrep_TOI_pre_query_len= query.length();
@@ -3341,6 +3460,9 @@ bool wsrep_create_like_table(THD* thd, TABLE_LIST* table,
 
     thd->wsrep_TOI_pre_query=      NULL;
     thd->wsrep_TOI_pre_query_len= 0;
+
+    /* Non-MERGE tables ignore this call. */
+    src_table->table->file->extra(HA_EXTRA_DETACH_CHILDREN);
   }
 
   return(false);
@@ -3415,7 +3537,7 @@ int wsrep_create_trigger_query(THD *thd, uchar** buf, size_t* buf_len)
 
 void* start_wsrep_THD(void *arg)
 {
-  THD *thd;
+  THD *thd= NULL;
 
   Wsrep_thd_args* thd_args= (Wsrep_thd_args*) arg;
 
@@ -3446,6 +3568,7 @@ void* start_wsrep_THD(void *arg)
   mysql_thread_set_psi_id(thd->thread_id);
   thd->thr_create_utime=  microsecond_interval_timer();
 
+  DBUG_EXECUTE_IF("wsrep_simulate_failed_connection_1", goto error; );
 // </5.1.17>
   /*
     handle_one_connection() is normally the only way a thread would
@@ -3552,6 +3675,18 @@ void* start_wsrep_THD(void *arg)
 error:
   WSREP_ERROR("Failed to create/initialize system thread");
 
+  if (thd)
+  {
+    close_connection(thd, ER_OUT_OF_RESOURCES);
+    statistic_increment(aborted_connects, &LOCK_status);
+    server_threads.erase(thd);
+    delete thd;
+    my_thread_end();
+  }
+  delete thd_args;
+  // This will signal error to wsrep_slave_threads_update
+  wsrep_thread_create_failed.store(true, std::memory_order_relaxed);
+
   /* Abort if its the first applier/rollbacker thread. */
   if (!mysqld_server_initialized)
     unireg_abort(1);
@@ -3570,6 +3705,15 @@ enum wsrep::streaming_context::fragment_unit wsrep_fragment_unit(ulong unit)
     DBUG_ASSERT(0);
     return wsrep::streaming_context::bytes;
   }
+}
+
+bool THD::wsrep_parallel_slave_wait_for_prior_commit()
+{
+  if (rgi_slave && rgi_slave->is_parallel_exec && wait_for_prior_commit())
+  {
+    return 1;
+  }
+  return 0;
 }
 
 /***** callbacks for wsrep service ************/
@@ -3602,19 +3746,28 @@ bool wsrep_consistency_check(THD *thd)
 void wsrep_commit_empty(THD* thd, bool all)
 {
   DBUG_ENTER("wsrep_commit_empty");
-  WSREP_DEBUG("wsrep_commit_empty(%llu)", thd->thread_id);
+  WSREP_DEBUG("wsrep_commit_empty for %llu client_state %s client_mode"
+              " %s trans_state %s sql %s",
+              thd_get_thread_id(thd),
+              wsrep::to_c_string(thd->wsrep_cs().state()),
+              wsrep::to_c_string(thd->wsrep_cs().mode()),
+              wsrep::to_c_string(thd->wsrep_cs().transaction().state()),
+              wsrep_thd_query(thd));
+
   if (wsrep_is_real(thd, all) &&
       wsrep_thd_is_local(thd) &&
       thd->wsrep_trx().active() &&
       !thd->internal_transaction() &&
       thd->wsrep_trx().state() != wsrep::transaction::s_committed)
   {
-    /* @todo CTAS with STATEMENT binlog format and empty result set
-       seems to be committing empty. Figure out why and try to fix
-       elsewhere. */
+    /* Here transaction is either empty (i.e. no changes) or
+       it was CREATE TABLE with no row binlog format or
+       we have already aborted transaction e.g. because max writeset size
+       has been reached. */
     DBUG_ASSERT(!wsrep_has_changes(thd) ||
                 (thd->lex->sql_command == SQLCOM_CREATE_TABLE &&
-                 !thd->is_current_stmt_binlog_format_row()));
+                 !thd->is_current_stmt_binlog_format_row()) ||
+                thd->wsrep_cs().transaction().state() == wsrep::transaction::s_aborted);
     bool have_error= wsrep_current_error(thd);
     int ret= wsrep_before_rollback(thd, all) ||
       wsrep_after_rollback(thd, all) ||

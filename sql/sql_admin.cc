@@ -44,7 +44,8 @@ const LEX_CSTRING msg_optimize= { STRING_WITH_LEN("optimize") };
 
 /* Prepare, run and cleanup for mysql_recreate_table() */
 
-static bool admin_recreate_table(THD *thd, TABLE_LIST *table_list)
+static bool admin_recreate_table(THD *thd, TABLE_LIST *table_list,
+                                 Recreate_info *recreate_info)
 {
   bool result_code;
   DBUG_ENTER("admin_recreate_table");
@@ -65,7 +66,7 @@ static bool admin_recreate_table(THD *thd, TABLE_LIST *table_list)
   DEBUG_SYNC(thd, "ha_admin_try_alter");
   tmp_disable_binlog(thd); // binlogging is done by caller if wanted
   result_code= (thd->open_temporary_tables(table_list) ||
-                mysql_recreate_table(thd, table_list, false));
+                mysql_recreate_table(thd, table_list, recreate_info, false));
   reenable_binlog(thd);
   /*
     mysql_recreate_table() can push OK or ERROR.
@@ -444,52 +445,6 @@ dbug_err:
   return open_error;
 }
 
-#ifdef WITH_WSREP
-/*
-  OPTIMIZE, REPAIR and ALTER may take MDL locks not only for the
-  affected table, but also for the table referenced by foreign key
-  constraint.
-
-  This wsrep_toi_replication() function handles TOI replication for
-  OPTIMIZE and REPAIR so that certification keys for potential FK
-  parent tables are also appended in the write set.  ALTER TABLE
-  case is handled elsewhere.
-*/
-
-static bool wsrep_toi_replication(THD *thd, TABLE_LIST *tables)
-{
-  LEX *lex= thd->lex;
-  /* only handle OPTIMIZE and REPAIR here */
-  switch (lex->sql_command)
-  {
-  case SQLCOM_OPTIMIZE:
-  case SQLCOM_REPAIR:
-    break;
-  default:
-    return false;
-  }
-
-  close_thread_tables(thd);
-  wsrep::key_array keys;
-
-  wsrep_append_fk_parent_table(thd, tables, &keys);
-
-  /* now TOI replication, with no locks held */
-  if (keys.empty())
-  {
-    if (!thd->lex->no_write_to_binlog &&
-	wsrep_to_isolation_begin(thd, NULL, NULL, tables))
-      return true;
-  }
-  else
-  {
-    if (!thd->lex->no_write_to_binlog &&
-	wsrep_to_isolation_begin(thd, NULL, NULL, tables, NULL, &keys))
-      return true;
-  }
-  return false;
-}
-#endif /* WITH_WSREP */
 
 
 static void send_read_only_warning(THD *thd, const LEX_CSTRING *msg_status,
@@ -593,16 +548,6 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
   close_thread_tables(thd);
   for (table= tables; table; table= table->next_local)
     table->table= NULL;
-#ifdef WITH_WSREP
-  if (WSREP(thd))
-  {
-    if(wsrep_toi_replication(thd, tables))
-    {
-      WSREP_INFO("wsrep TOI replication of has failed.");
-      goto err;
-    }
-  }
-#endif /* WITH_WSREP */
 
   for (table= tables; table; table= table->next_local)
   {
@@ -616,6 +561,7 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
     bool open_error= 0;
     bool collect_eis=  FALSE;
     bool open_for_modify= org_open_for_modify;
+    Recreate_info recreate_info;
 
     storage_engine_name[0]= 0;                  // Marker that's not used
 
@@ -885,7 +831,8 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
       {
         /* We use extra_open_options to be able to open crashed tables */
         thd->open_options|= extra_open_options;
-        result_code= admin_recreate_table(thd, table);
+        result_code= admin_recreate_table(thd, table, &recreate_info) ?
+                     HA_ADMIN_FAILED : HA_ADMIN_OK;
         thd->open_options&= ~extra_open_options;
         goto send_result;
       }
@@ -1068,12 +1015,31 @@ static bool mysql_admin_table(THD* thd, TABLE_LIST* tables,
         repair was not implemented and we need to upgrade the table
         to a new version so we recreate the table with ALTER TABLE
       */
-      result_code= admin_recreate_table(thd, table);
+      result_code= admin_recreate_table(thd, table, &recreate_info);
     }
 send_result:
 
     lex->cleanup_after_one_table_open();
     thd->clear_error();  // these errors shouldn't get client
+
+    if (recreate_info.records_duplicate())
+    {
+      protocol->prepare_for_resend();
+      protocol->store(&table_name, system_charset_info);
+      protocol->store(operator_name, system_charset_info);
+      protocol->store(warning_level_names[Sql_condition::WARN_LEVEL_WARN].str,
+                      warning_level_names[Sql_condition::WARN_LEVEL_WARN].length,
+                      system_charset_info);
+      char buf[80];
+      size_t length= my_snprintf(buf, sizeof(buf),
+                                 "Number of rows changed from %u to %u",
+                                 (uint) recreate_info.records_processed(),
+                                 (uint) recreate_info.records_copied());
+      protocol->store(buf, length, system_charset_info);
+      if (protocol->write())
+        goto err;
+    }
+
     {
       Diagnostics_area::Sql_condition_iterator it=
         thd->get_stmt_da()->sql_conditions();
@@ -1184,7 +1150,7 @@ send_result_message:
                  *save_next_global= table->next_global;
       table->next_local= table->next_global= 0;
 
-      result_code= admin_recreate_table(thd, table);
+      result_code= admin_recreate_table(thd, table, &recreate_info);
       trans_commit_stmt(thd);
       trans_commit(thd);
       close_thread_tables(thd);
@@ -1396,6 +1362,8 @@ send_result_message:
       goto err;
     DEBUG_SYNC(thd, "admin_command_kill_after_modify");
   }
+  thd->resume_subsequent_commits(suspended_wfc);
+  DBUG_EXECUTE_IF("inject_analyze_table_sleep", my_sleep(500000););
   if (is_table_modified && is_cmd_replicated &&
       (!opt_readonly || thd->slave_thread) && !thd->lex->no_write_to_binlog)
   {
@@ -1405,10 +1373,8 @@ send_result_message:
     if (res)
       goto err;
   }
-
   my_eof(thd);
-  thd->resume_subsequent_commits(suspended_wfc);
-  DBUG_EXECUTE_IF("inject_analyze_table_sleep", my_sleep(500000););
+
   DBUG_RETURN(FALSE);
 
 err:
@@ -1557,20 +1523,25 @@ bool Sql_cmd_optimize_table::execute(THD *thd)
   LEX *m_lex= thd->lex;
   TABLE_LIST *first_table= m_lex->first_select_lex()->table_list.first;
   bool res= TRUE;
+  Recreate_info recreate_info;
   DBUG_ENTER("Sql_cmd_optimize_table::execute");
 
   if (check_table_access(thd, SELECT_ACL | INSERT_ACL, first_table,
                          FALSE, UINT_MAX, FALSE))
     goto error; /* purecov: inspected */
 
+  WSREP_TO_ISOLATION_BEGIN_WRTCHK(NULL, NULL, first_table);
   res= (specialflag & SPECIAL_NO_NEW_FUNC) ?
-    mysql_recreate_table(thd, first_table, true) :
+    mysql_recreate_table(thd, first_table, &recreate_info, true) :
     mysql_admin_table(thd, first_table, &m_lex->check_opt,
                       &msg_optimize, TL_WRITE, 1, 0, 0, 0,
                       &handler::ha_optimize, 0, true);
   m_lex->first_select_lex()->table_list.first= first_table;
   m_lex->query_tables= first_table;
 
+#ifdef WITH_WSREP
+wsrep_error_label:
+#endif /* WITH_WSREP */
 error:
   DBUG_RETURN(res);
 }
@@ -1586,6 +1557,7 @@ bool Sql_cmd_repair_table::execute(THD *thd)
   if (check_table_access(thd, SELECT_ACL | INSERT_ACL, first_table,
                          FALSE, UINT_MAX, FALSE))
     goto error; /* purecov: inspected */
+  WSREP_TO_ISOLATION_BEGIN_WRTCHK(NULL, NULL, first_table);
   res= mysql_admin_table(thd, first_table, &m_lex->check_opt, &msg_repair,
                          TL_WRITE, 1,
                          MY_TEST(m_lex->check_opt.sql_flags & TT_USEFRM),
@@ -1595,6 +1567,9 @@ bool Sql_cmd_repair_table::execute(THD *thd)
   m_lex->first_select_lex()->table_list.first= first_table;
   m_lex->query_tables= first_table;
 
+#ifdef WITH_WSREP
+wsrep_error_label:
+#endif /* WITH_WSREP */
 error:
   DBUG_RETURN(res);
 }

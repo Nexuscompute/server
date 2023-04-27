@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2010, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -38,6 +38,11 @@
 
 THR_LOCK table_setup_actors::m_table_lock;
 
+PFS_engine_table_share_state
+table_setup_actors::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_setup_actors::m_share=
 {
@@ -55,7 +60,9 @@ table_setup_actors::m_share=
                       "ROLE CHAR(" USERNAME_CHAR_LENGTH_STR ") collate utf8_bin default '%' not null comment 'Unused',"
                       "ENABLED ENUM('YES', 'NO') not null default 'YES' comment 'Whether to enable instrumentation for foreground threads matched by the row.',"
                       "HISTORY ENUM('YES', 'NO') not null default 'YES' comment 'Whether to log historical events for foreground threads matched by the row.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_setup_actors::create()
@@ -100,7 +107,7 @@ int table_setup_actors::write_row(TABLE *table, const unsigned char *buf,
         history_value= (enum_yes_no) get_field_enum(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -221,7 +228,7 @@ int table_setup_actors::read_row_values(TABLE *table,
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
 
   for (; (f= *fields) ; fields++)
   {
@@ -245,7 +252,7 @@ int table_setup_actors::read_row_values(TABLE *table,
         set_field_enum(f, (*m_row.m_history_ptr) ? ENUM_YES : ENUM_NO);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -287,7 +294,7 @@ int table_setup_actors::update_row_values(TABLE *table,
         *m_row.m_history_ptr= (value == ENUM_YES) ? true : false;
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -300,7 +307,7 @@ int table_setup_actors::delete_row_values(TABLE *table,
                                           const unsigned char *buf,
                                           Field **fields)
 {
-  DBUG_ASSERT(m_row_exists);
+  assert(m_row_exists);
 
   CHARSET_INFO *cs= &my_charset_utf8mb3_bin;
   String user(m_row.m_username, m_row.m_username_length, cs);

@@ -1,6 +1,6 @@
 /*
 Copyright (c) 2008-2009, Patrick Galbraith & Antony Curtis
-Copyright (c) 2020, MariaDB Corporation.
+Copyright (c) 2020, 2022, MariaDB Corporation.
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -315,6 +315,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define MYSQL_SERVER 1
 #include <my_global.h>
 #include <mysql/plugin.h>
+#include <mysql.h>
 #include "ha_federatedx.h"
 #include "sql_servers.h"
 #include "sql_analyse.h"                        // append_escaped()
@@ -610,7 +611,7 @@ error:
     parse_url()
     mem_root            MEM_ROOT pointer for memory allocation
     share               pointer to FEDERATEDX share
-    table               pointer to current TABLE class
+    table_s             pointer to current TABLE_SHARE class
     table_create_flag   determines what error to throw
 
   DESCRIPTION
@@ -1218,7 +1219,6 @@ bool ha_federatedx::create_where_from_key(String *to,
                                          KEY *key_info,
                                          const key_range *start_key,
                                          const key_range *end_key,
-                                         bool from_records_in_range,
                                          bool eq_range)
 {
   bool both_not_null=
@@ -1239,7 +1239,6 @@ bool ha_federatedx::create_where_from_key(String *to,
   MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
   for (uint i= 0; i <= 1; i++)
   {
-    bool needs_quotes;
     KEY_PART_INFO *key_part;
     if (ranges[i] == NULL)
       continue;
@@ -1262,7 +1261,12 @@ bool ha_federatedx::create_where_from_key(String *to,
       Field *field= key_part->field;
       uint store_length= key_part->store_length;
       uint part_length= MY_MIN(store_length, length);
-      needs_quotes= field->str_needs_quotes();
+      bool needs_quotes= field->str_needs_quotes();
+      bool reverse= key_part->key_part_flag & HA_REVERSE_SORT;
+      static const LEX_CSTRING lt={STRING_WITH_LEN(" < ") };
+      static const LEX_CSTRING gt={STRING_WITH_LEN(" > ") };
+      static const LEX_CSTRING le={STRING_WITH_LEN(" <= ") };
+      static const LEX_CSTRING ge={STRING_WITH_LEN(" >= ") };
       DBUG_DUMP("key, start of loop", ptr, length);
 
       if (key_part->null_bit)
@@ -1304,16 +1308,8 @@ bool ha_federatedx::create_where_from_key(String *to,
           if (emit_key_part_name(&tmp, key_part))
             goto err;
 
-          if (from_records_in_range)
-          {
-            if (tmp.append(STRING_WITH_LEN(" >= ")))
-              goto err;
-          }
-          else
-          {
-            if (tmp.append(STRING_WITH_LEN(" = ")))
-              goto err;
-          }
+          if (tmp.append(STRING_WITH_LEN(" = ")))
+            goto err;
 
           if (emit_key_part_element(&tmp, key_part, needs_quotes, 0, ptr,
                                     part_length))
@@ -1344,12 +1340,12 @@ bool ha_federatedx::create_where_from_key(String *to,
 
           if (i > 0) /* end key */
           {
-            if (tmp.append(STRING_WITH_LEN(" <= ")))
+            if (tmp.append(reverse ? ge : le))
               goto err;
           }
           else /* start key */
           {
-            if (tmp.append(STRING_WITH_LEN(" > ")))
+            if (tmp.append(reverse ? lt : gt))
               goto err;
           }
 
@@ -1364,7 +1360,7 @@ bool ha_federatedx::create_where_from_key(String *to,
       case HA_READ_KEY_OR_NEXT:
         DBUG_PRINT("info", ("federatedx HA_READ_KEY_OR_NEXT %d", i));
         if (emit_key_part_name(&tmp, key_part) ||
-            tmp.append(STRING_WITH_LEN(" >= ")) ||
+            tmp.append(reverse ? le : ge) ||
             emit_key_part_element(&tmp, key_part, needs_quotes, 0, ptr,
               part_length))
           goto err;
@@ -1374,7 +1370,7 @@ bool ha_federatedx::create_where_from_key(String *to,
         if (store_length >= length)
         {
           if (emit_key_part_name(&tmp, key_part) ||
-              tmp.append(STRING_WITH_LEN(" < ")) ||
+              tmp.append(reverse ? gt : lt) ||
               emit_key_part_element(&tmp, key_part, needs_quotes, 0, ptr,
                                     part_length))
             goto err;
@@ -1384,7 +1380,7 @@ bool ha_federatedx::create_where_from_key(String *to,
       case HA_READ_KEY_OR_PREV:
         DBUG_PRINT("info", ("federatedx HA_READ_KEY_OR_PREV %d", i));
         if (emit_key_part_name(&tmp, key_part) ||
-            tmp.append(STRING_WITH_LEN(" <= ")) ||
+            tmp.append(reverse ? ge : le) ||
             emit_key_part_element(&tmp, key_part, needs_quotes, 0, ptr,
                                   part_length))
           goto err;
@@ -1823,7 +1819,7 @@ int ha_federatedx::open(const char *name, int mode, uint test_if_locked)
 class Net_error_handler : public Internal_error_handler
 {
 public:
-  Net_error_handler() {}
+  Net_error_handler() = default;
 
 public:
   bool handle_condition(THD *thd, uint sql_errno, const char* sqlstate,
@@ -2639,10 +2635,7 @@ int ha_federatedx::index_read_idx_with_result_set(uchar *buf, uint index,
   range.key= key;
   range.length= key_len;
   range.flag= find_flag;
-  create_where_from_key(&index_string,
-                        &table->key_info[index],
-                        &range,
-                        NULL, 0, 0);
+  create_where_from_key(&index_string, &table->key_info[index], &range, 0, 0);
   sql_query.append(index_string);
 
   if ((retval= txn->acquire(share, ha_thd(), TRUE, &io)))
@@ -2650,7 +2643,7 @@ int ha_federatedx::index_read_idx_with_result_set(uchar *buf, uint index,
 
   if (io->query(sql_query.ptr(), sql_query.length()))
   {
-    sprintf(error_buffer, "error: %d '%s'",
+    snprintf(error_buffer, sizeof(error_buffer), "error: %d '%s'",
             io->error_code(), io->error_str());
     retval= ER_QUERY_ON_FOREIGN_DATA_SOURCE;
     goto error;
@@ -2721,9 +2714,8 @@ int ha_federatedx::read_range_first(const key_range *start_key,
 
   sql_query.length(0);
   sql_query.append(share->select_query);
-  create_where_from_key(&sql_query,
-                        &table->key_info[active_index],
-                        start_key, end_key, 0, eq_range_arg);
+  create_where_from_key(&sql_query, &table->key_info[active_index],
+                        start_key, end_key, eq_range_arg);
 
   if ((retval= txn->acquire(share, ha_thd(), TRUE, &io)))
     DBUG_RETURN(retval);
@@ -3375,7 +3367,7 @@ static int test_connection(MYSQL_THD thd, federatedx_io *io,
 
   if ((retval= io->query(str.ptr(), str.length())))
   {
-    sprintf(buffer, "database: '%s'  username: '%s'  hostname: '%s'",
+    snprintf(buffer, sizeof(buffer), "database: '%s'  username: '%s'  hostname: '%s'",
             share->database, share->username, share->hostname);
     DBUG_PRINT("info", ("error-code: %d", io->error_code()));
     my_error(ER_CANT_CREATE_FEDERATED_TABLE, MYF(0), buffer);

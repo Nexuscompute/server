@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -91,6 +91,7 @@ struct pos_setup_instruments : public PFS_double_index
 class table_setup_instruments : public PFS_engine_table
 {
 public:
+  static PFS_engine_table_share_state m_share_state;
   /** Table share. */
   static PFS_engine_table_share m_share;
   static PFS_engine_table* create();
@@ -114,8 +115,7 @@ protected:
   table_setup_instruments();
 
 public:
-  ~table_setup_instruments()
-  {}
+  ~table_setup_instruments() = default;
 
 private:
   void make_row(PFS_instr_class *klass, bool update_enabled, bool update_timed);

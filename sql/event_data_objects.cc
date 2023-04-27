@@ -32,6 +32,7 @@
 #include "sp_head.h"
 #include "sql_show.h"                // append_definer, append_identifier
 #include "mysql/psi/mysql_sp.h"
+#include "wsrep_mysqld.h"
 #ifdef WITH_WSREP
 #include "wsrep_trans_observer.h"
 #endif /* WITH_WSREP */
@@ -327,9 +328,7 @@ Event_queue_element::Event_queue_element():
   SYNOPSIS
     Event_queue_element::Event_queue_element()
 */
-Event_queue_element::~Event_queue_element()
-{
-}
+Event_queue_element::~Event_queue_element() = default;
 
 
 /*
@@ -355,9 +354,7 @@ Event_timed::Event_timed():
     Event_timed::~Event_timed()
 */
 
-Event_timed::~Event_timed()
-{
-}
+Event_timed::~Event_timed() = default;
 
 
 /*

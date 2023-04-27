@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2013, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2021, MariaDB Corporation.
+   Copyright (c) 2010, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -28,9 +28,7 @@ C_MODE_START
 #include <m_ctype.h>                    /* for CHARSET_INFO */
 #include <stdarg.h>
 #include <typelib.h>
-#ifdef _WIN32
-#include <malloc.h> /*for alloca*/
-#endif
+#include <my_alloca.h>
 #include <mysql/plugin.h>
 #include <mysql/service_my_print_error.h>
 
@@ -195,16 +193,6 @@ my_bool my_test_if_thinly_provisioned(File handle);
 extern my_bool my_may_have_atomic_write;
 
 #if defined(HAVE_ALLOCA) && !defined(HAVE_valgrind)
-#if defined(_AIX) && !defined(__GNUC__) && !defined(_AIX43)
-#pragma alloca
-#endif /* _AIX */
-#if defined(__MWERKS__)
-#undef alloca
-#define alloca _alloca
-#endif /* __MWERKS__ */
-#if defined(__GNUC__) && !defined(HAVE_ALLOCA_H) && ! defined(alloca)
-#define alloca __builtin_alloca
-#endif /* GNUC */
 #define my_alloca(SZ) alloca((size_t) (SZ))
 #define my_afree(PTR) ((void)0)
 #define MAX_ALLOCA_SZ 4096
@@ -277,7 +265,7 @@ extern int my_umask_dir,
 extern SECURITY_ATTRIBUTES my_dir_security_attributes;
 LPSECURITY_ATTRIBUTES my_win_file_secattr();
 #endif
-extern my_bool my_use_symdir;
+extern MYSQL_PLUGIN_IMPORT my_bool my_use_symdir;
 
 extern ulong	my_default_record_cache_size;
 extern MYSQL_PLUGIN_IMPORT my_bool my_disable_locking;
@@ -438,7 +426,7 @@ typedef struct st_io_cache		/* Used when caching files */
   /*
     A caller will use my_b_read() macro to read from the cache
     if the data is already in cache, it will be simply copied with
-    memcpy() and internal variables will be accordinging updated with
+    memcpy() and internal variables will be accordingly updated with
     no functions invoked. However, if the data is not fully in the cache,
     my_b_read() will call read_function to fetch the data. read_function
     must never be invoked directly.
@@ -482,7 +470,7 @@ typedef struct st_io_cache		/* Used when caching files */
   myf	myflags;			/* Flags used to my_read/my_write */
   /*
     alloced_buffer is set to the size of the buffer allocated for the IO_CACHE.
-    Includes the overhead(storing key to ecnrypt and decrypt) for encryption.
+    Includes the overhead(storing key to encrypt and decrypt) for encryption.
     Set to 0 if nothing is allocated.
     Currently READ_NET is the only one that will use a buffer allocated
     somewhere else
@@ -958,6 +946,17 @@ extern ulonglong my_getcputime(void);
 #define hrtime_sec_part(X)              ((ulong)((X).val % HRTIME_RESOLUTION))
 #define my_time(X)                      hrtime_to_time(my_hrtime_coarse())
 
+/**
+  Make high resolution time from two parts.
+*/
+
+static inline my_hrtime_t make_hr_time(my_time_t time, ulong time_sec_part)
+{
+  my_hrtime_t res= {((ulonglong) time)*1000000 + time_sec_part};
+  return res;
+}
+
+
 #if STACK_DIRECTION < 0
 #define available_stack_size(CUR,END) (long) ((char*)(CUR) - (char*)(END))
 #else
@@ -987,7 +986,7 @@ extern ulonglong my_getcputime(void);
 #define my_munmap(a,b)          munmap((a),(b))
 
 #else
-/* not a complete set of mmap() flags, but only those that nesessary */
+/* not a complete set of mmap() flags, but only those that necessary */
 #define PROT_READ        1
 #define PROT_WRITE       2
 #define MAP_NORESERVE    0

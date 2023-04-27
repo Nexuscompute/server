@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -38,6 +38,10 @@
 #include "field.h"
 
 THR_LOCK table_setup_objects::m_table_lock;
+PFS_engine_table_share_state
+table_setup_objects::m_share_state = {
+  false /* m_checked */
+};
 
 PFS_engine_table_share
 table_setup_objects::m_share=
@@ -56,7 +60,9 @@ table_setup_objects::m_share=
                       "OBJECT_NAME VARCHAR(64) not null default '%' comment 'Name of the instrumented object, either the literal or % for any object.',"
                       "ENABLED ENUM ('YES', 'NO') not null default 'YES' comment 'Whether the object''s events are instrumented or not. Can be disabled, in which case monitoring is not enabled for those objects.',"
                       "TIMED ENUM ('YES', 'NO') not null default 'YES' comment 'Whether the object''s events are timed or not. Can be modified.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 int update_derived_flags()
@@ -113,7 +119,7 @@ int table_setup_objects::write_row(TABLE *table, const unsigned char *buf,
         timed_value= (enum_yes_no) get_field_enum(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -230,7 +236,7 @@ int table_setup_objects::read_row_values(TABLE *table,
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -263,7 +269,7 @@ int table_setup_objects::read_row_values(TABLE *table,
         set_field_enum(f, (*m_row.m_timed_ptr) ? ENUM_YES : ENUM_NO);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -305,7 +311,7 @@ int table_setup_objects::update_row_values(TABLE *table,
         *m_row.m_timed_ptr= (value == ENUM_YES) ? true : false;
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -318,7 +324,7 @@ int table_setup_objects::delete_row_values(TABLE *table,
                                            const unsigned char *buf,
                                            Field **fields)
 {
-  DBUG_ASSERT(m_row_exists);
+  assert(m_row_exists);
 
   CHARSET_INFO *cs= &my_charset_utf8mb3_bin;
   enum_object_type object_type= OBJECT_TYPE_TABLE;

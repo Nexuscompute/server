@@ -1,6 +1,7 @@
 # This is the DDL function tests for innodb FTS
 
 -- source include/have_innodb.inc
+-- source include/maybe_versioning.inc
 
 # Create FTS table
 CREATE TABLE fts_test (
@@ -54,7 +55,21 @@ SELECT * FROM fts_test WHERE MATCH (title,body)
         AGAINST ('+MySQL -YourSQL' IN BOOLEAN MODE);
 
 # Truncate table
+let $vers=$MTR_COMBINATION_VERS+$MTR_COMBINATION_VERS_TRX;
+
+if ($vers)
+{
+--disable_query_log
+CREATE TABLE fts_test2 LIKE fts_test;
+DROP TABLE fts_test;
+RENAME TABLE fts_test2 TO fts_test;
+--enable_query_log
+--echo TRUNCATE TABLE fts_test;
+}
+if (!$vers)
+{
 TRUNCATE TABLE fts_test;
+}
 
 DROP INDEX idx ON fts_test;
 
@@ -333,6 +348,7 @@ CREATE TABLE t1(a TEXT, FTS_DOC_ID BIGINT UNSIGNED NOT NULL UNIQUE) ENGINE=InnoD
 let $fts_aux_file= `select concat('FTS_',right(concat(repeat('0',16), lower(hex(TABLE_ID))),16),'_BEING_DELETED.ibd') FROM INFORMATION_SCHEMA.INNODB_SYS_TABLES WHERE NAME='test/t1'`;
 write_file $MYSQLD_DATADIR/test/$fts_aux_file;
 EOF
+--replace_regex /".*" from/"Resource temporarily unavailable" from/
 --error ER_GET_ERRNO
 ALTER TABLE t1 ADD FULLTEXT(a), ALGORITHM=INPLACE;
 DROP TABLE t1;
@@ -356,3 +372,28 @@ ALTER TABLE t1 ADD c SERIAL;
 DROP TABLE t1;
 
 --echo # End of 10.3 tests
+
+--echo #
+--echo #  MDEV-27582 Fulltext DDL decrements the FTS_DOC_ID value
+--echo #
+CREATE TABLE t1 (
+	f1 INT NOT NULL PRIMARY KEY,
+        f2 VARCHAR(64), FULLTEXT ft(f2)) ENGINE=InnoDB;
+INSERT INTO t1 VALUES (1,'foo'),(2,'bar');
+connect(con1,localhost,root,,,);
+START TRANSACTION WITH CONSISTENT SNAPSHOT;
+
+connection default;
+DELETE FROM t1 WHERE f1 = 2;
+ALTER TABLE t1 DROP INDEX ft;
+ALTER TABLE t1 ADD FULLTEXT INDEX ft (f2);
+INSERT INTO t1 VALUES (3, 'innodb fts search');
+SET GLOBAL innodb_optimize_fulltext_only=ON;
+OPTIMIZE TABLE t1;
+SET GLOBAL innodb_ft_aux_table = 'test/t1';
+SELECT max(DOC_ID) FROM INFORMATION_SCHEMA.INNODB_FT_INDEX_TABLE;
+SELECT * FROM t1 WHERE MATCH(f2) AGAINST("+innodb +search" IN BOOLEAN MODE);
+DROP TABLE t1;
+disconnect con1;
+SET GLOBAL innodb_optimize_fulltext_only=OFF;
+SET GLOBAL innodb_ft_aux_table = default;

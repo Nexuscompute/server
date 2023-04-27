@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -29,6 +29,11 @@
 
 THR_LOCK table_threads::m_table_lock;
 
+PFS_engine_table_share_state
+table_threads::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_threads::m_share=
 {
@@ -58,7 +63,9 @@ table_threads::m_share=
                       "HISTORY ENUM ('YES', 'NO') not null comment 'Whether to log historical events for the thread.',"
                       "CONNECTION_TYPE VARCHAR(16) comment 'The protocol used to establish the connection, or NULL for background threads.',"
                       "THREAD_OS_ID BIGINT unsigned comment 'The thread or task identifier as defined by the underlying operating system, if there is one.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_threads::create()
@@ -193,7 +200,7 @@ int table_threads::read_row_values(TABLE *table,
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 2);
+  assert(table->s->null_bytes == 2);
   buf[0]= 0;
   buf[1]= 0;
 
@@ -266,7 +273,7 @@ int table_threads::read_row_values(TABLE *table,
            server is updating this column for those threads. To prevent this
            kind of issue, an assert is added.
          */
-        DBUG_ASSERT(m_row.m_processlist_state_length <= f->char_length());
+        assert(m_row.m_processlist_state_length <= f->char_length());
         if (m_row.m_processlist_state_length > 0)
           set_field_varchar_utf8(f, m_row.m_processlist_state_ptr,
                                  m_row.m_processlist_state_length);
@@ -309,7 +316,7 @@ int table_threads::read_row_values(TABLE *table,
           f->set_null();
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -356,7 +363,7 @@ int table_threads::update_row_values(TABLE *table,
       case 16: /* THREAD_OS_ID */
         return HA_ERR_WRONG_COMMAND;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

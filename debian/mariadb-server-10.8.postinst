@@ -20,7 +20,7 @@ set -o pipefail
 
 case "$1" in
   configure)
-    # This is needed because mysql_install_db removes the pid file in /run
+    # This is needed because mariadb-install-db removes the pid file in /run
     # and because changed configuration options should take effect immediately.
     # In case the server wasn't running at all it should be ok if the stop
     # script fails. I can't tell at this point because of the cleaned /run.
@@ -115,7 +115,7 @@ EOF
     if [ -f "$mysql_datadir"/auto.cnf ] && [ -f "$mysql_datadir"/mysql/user.MYD ] &&
        [ ! lsof -nt "$mysql_datadir"/mysql/user.MYD > /dev/null ] && [ ! -f "$mysql_datadir"/undo_001 ]; then
          echo "UPDATE mysql.user SET plugin='unix_socket' WHERE plugin='auth_socket';" |
-             /usr/sbin/mariadbd --skip-innodb --key_buffer_size=0  --default-storage-engine=MyISAM --bootstrap 2> /dev/null
+             mariadbd --skip-innodb --key_buffer_size=0  --default-storage-engine=MyISAM --bootstrap 2> /dev/null
     fi
 
     # Ensure the existence and right permissions for the database and
@@ -155,7 +155,7 @@ EOF
 
     # This is important to avoid dataloss when there is a removed
     # mysql-server version from Woody lying around which used the same
-    # data directory and then somewhen gets purged by the admin.
+    # data directory and then somehow gets purged by the admin.
     db_set mariadb-server/postrm_remove_database false || true
 
     # Clean up old flags before setting new one
@@ -165,12 +165,12 @@ EOF
 
     # initiate databases. Output is not allowed by debconf :-(
     # This will fail if we are upgrading an existing database; in this case
-    # mysql_upgrade, called from the /etc/init.d/mariadb start script, will
+    # mariadb-upgrade, called from the /etc/mysql/debian-start script, will
     # handle things.
     # Debian: beware of the bashisms...
     # Debian: can safely run on upgrades with existing databases
     set +e
-    bash /usr/bin/mysql_install_db --rpm --cross-bootstrap --user=mysql \
+    bash /usr/bin/mariadb-install-db --rpm --cross-bootstrap --user=mysql \
                                    --disable-log-bin  --skip-test-db 2>&1 | \
                                    $ERR_LOGGER
     set -e

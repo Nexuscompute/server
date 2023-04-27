@@ -264,14 +264,14 @@ public:
        */
       int check_state(enum_state const target_state)
       {
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
         static char const *state_name[] = {
           "START_STATE", "TABLE_STATE", "ROW_STATE", "STATE_COUNT"
         };
 
-        DBUG_ASSERT(target_state <= STATE_COUNT);
         DBUG_PRINT("info", ("In state %s", state_name[m_state]));
 #endif
+        DBUG_ASSERT(target_state <= STATE_COUNT);
 
         if (m_state <= target_state && target_state <= m_state + 1 &&
             m_state < STATE_COUNT)
@@ -307,7 +307,7 @@ public:
 
 private:
     explicit injector();
-    ~injector() { }             /* Nothing needs to be done */
+    ~injector() = default;             /* Nothing needs to be done */
     injector(injector const&);  /* You're not allowed to copy injector
                                    instances.
                                 */ 

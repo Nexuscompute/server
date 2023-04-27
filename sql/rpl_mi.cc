@@ -1,5 +1,5 @@
 /* Copyright (c) 2006, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2017, MariaDB Corporation
+   Copyright (c) 2010, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -85,6 +85,14 @@ Master_info::Master_info(LEX_CSTRING *connection_name_arg,
   mysql_mutex_init(key_master_info_data_lock, &data_lock, MY_MUTEX_INIT_FAST);
   mysql_mutex_init(key_master_info_start_stop_lock, &start_stop_lock,
                    MY_MUTEX_INIT_SLOW);
+  /*
+    start_alter_lock will protect individual start_alter_info while
+    start_alter_list_lock is for list insertion and deletion operations
+  */
+  mysql_mutex_init(key_master_info_start_alter_lock, &start_alter_lock,
+                                      MY_MUTEX_INIT_FAST);
+  mysql_mutex_init(key_master_info_start_alter_list_lock, &start_alter_list_lock,
+                                      MY_MUTEX_INIT_FAST);
   mysql_mutex_setflags(&run_lock, MYF_NO_DEADLOCK_DETECTION);
   mysql_mutex_setflags(&data_lock, MYF_NO_DEADLOCK_DETECTION);
   mysql_mutex_init(key_master_info_sleep_lock, &sleep_lock, MY_MUTEX_INIT_FAST);
@@ -92,6 +100,7 @@ Master_info::Master_info(LEX_CSTRING *connection_name_arg,
   mysql_cond_init(key_master_info_start_cond, &start_cond, NULL);
   mysql_cond_init(key_master_info_stop_cond, &stop_cond, NULL);
   mysql_cond_init(key_master_info_sleep_cond, &sleep_cond, NULL);
+  init_sql_alloc(PSI_INSTRUMENT_ME, &mem_root, MEM_ROOT_BLOCK_SIZE, 0, MYF(0));
 }
 
 
@@ -121,10 +130,13 @@ Master_info::~Master_info()
   mysql_mutex_destroy(&data_lock);
   mysql_mutex_destroy(&sleep_lock);
   mysql_mutex_destroy(&start_stop_lock);
+  mysql_mutex_destroy(&start_alter_lock);
+  mysql_mutex_destroy(&start_alter_list_lock);
   mysql_cond_destroy(&data_cond);
   mysql_cond_destroy(&start_cond);
   mysql_cond_destroy(&stop_cond);
   mysql_cond_destroy(&sleep_cond);
+  free_root(&mem_root, MYF(0));
 }
 
 /**

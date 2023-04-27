@@ -468,7 +468,7 @@ public:
       return def->frm_unpack_charset(share, buffer);
     }
     void make_sort_key_part(uchar *to, Item *item, const SORT_FIELD_ATTR *sort_field,
-                            Sort_param *param) const override
+                            String *) const override
     {
       DBUG_ASSERT(item->type_handler() == this);
       NativeBuffer<FbtImpl::binary_length()+1> tmp;
@@ -489,7 +489,7 @@ public:
     }
     uint make_packed_sort_key_part(uchar *to, Item *item,
                                    const SORT_FIELD_ATTR *sort_field,
-                                   Sort_param *param) const override
+                                   String *) const override
     {
       DBUG_ASSERT(item->type_handler() == this);
       NativeBuffer<FbtImpl::binary_length()+1> tmp;
@@ -1190,7 +1190,6 @@ public:
     bool val_native(Native *to) override
     {
       DBUG_ASSERT(marked_for_read());
-      DBUG_ASSERT(!is_null());
       if (to->alloc(FbtImpl::binary_length()))
         return true;
       to->length(FbtImpl::binary_length());
@@ -1201,7 +1200,6 @@ public:
     Fbt to_fbt() const
     {
       DBUG_ASSERT(marked_for_read());
-      DBUG_ASSERT(!is_null());
       return Fbt::record_to_memory((const char*) ptr);
     }
 
@@ -1410,7 +1408,8 @@ public:
         Mixing of two different non-traditional types is currently prevented.
         This may change in the future.
       */
-      DBUG_ASSERT(item->type_handler()->is_traditional_scalar_type() ||
+      DBUG_ASSERT(item->type_handler()->type_handler_base_or_self()->
+                  is_traditional_scalar_type() ||
                   item->type_handler() == type_handler());
       return true;
     }
@@ -1424,16 +1423,14 @@ public:
                             bool is_eq_func) const override
     {
       // See the DBUG_ASSERT comment in can_optimize_keypart_ref()
-      DBUG_ASSERT(item->type_handler()->is_traditional_scalar_type() ||
+      DBUG_ASSERT(item->type_handler()->type_handler_base_or_self()->
+                  is_traditional_scalar_type() ||
                   item->type_handler() == type_handler());
       return true;
     }
-    void hash(ulong *nr, ulong *nr2) override
+    void hash_not_null(Hasher *hasher) override
     {
-      if (is_null())
-        *nr^= (*nr << 1) | 1;
-      else
-        FbtImpl::hash_record(ptr, nr, nr2);
+      FbtImpl::hash_record(ptr, hasher);
     }
     SEL_ARG *get_mm_leaf(RANGE_OPT_PARAM *prm, KEY_PART *key_part,
                          const Item_bool_func *cond,
@@ -1587,8 +1584,9 @@ public:
       if (!example)
         return false;
       value_cached= true;
-      null_value= example->val_native_with_conversion_result(current_thd,
-                                                 &m_value, type_handler());
+      null_value_inside= null_value=
+        example->val_native_with_conversion_result(current_thd,
+                                                   &m_value, type_handler());
       return true;
     }
     String* val_str(String *to)

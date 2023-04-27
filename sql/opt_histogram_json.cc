@@ -178,22 +178,13 @@ private:
   void append_histogram_params()
   {
     char buf[128];
+    String str(buf, sizeof(buf), system_charset_info);
+    THD *thd= current_thd;
+    timeval tv= {thd->query_start(), 0}; // we do not need microseconds
 
-    time_t cur_time_t= my_time(0);
-    struct tm curtime;
-    localtime_r(&cur_time_t, &curtime);
-
-    my_snprintf(buf, sizeof(buf), "%d-%02d-%02d %2d:%02d:%02d %s",
-                curtime.tm_year + 1900,
-                curtime.tm_mon+1,
-                curtime.tm_mday,
-                curtime.tm_hour,
-                curtime.tm_min,
-                curtime.tm_sec,
-                system_time_zone);
-
+    Timestamp(tv).to_datetime(thd).to_string(&str, 0);
     writer.add_member("target_histogram_size").add_ull(hist_width);
-    writer.add_member("collected_at").add_str(buf);
+    writer.add_member("collected_at").add_str(str.ptr());
     writer.add_member("collected_by").add_str(server_version);
   }
   /*
@@ -968,9 +959,16 @@ std::string& Histogram_json_hb::get_end_value(int idx)
   @param field    The table field histogram is for.  We don't care about the
                   field's current value, we only need its virtual functions to
                   perform various operations
-
   @param min_endp Left endpoint, or NULL if there is none
   @param max_endp Right endpoint, or NULL if there is none
+  @param avg_sel  Average selectivity of "field=const" equality for this field
+
+  @return
+     Range selectivity: a number between 0.0 and 1.0.
+
+  @note
+     This may return 0.0. Adjustments to avoid multiply-by-zero meltdown are
+     made elsewhere.
 */
 
 double Histogram_json_hb::range_selectivity(Field *field, key_range *min_endp,
@@ -1071,6 +1069,18 @@ double Histogram_json_hb::range_selectivity(Field *field, key_range *min_endp,
   else
     max= 1.0;
 
+  if (min > max)
+  {
+    /*
+      This can happen due to rounding errors.
+
+      What is the acceptable error size? Json_writer::add_double() uses
+      %.11lg format. This gives 9 digits after the dot. A histogram may have
+      hundreds of buckets, let's multiply the error by 1000. 9-3=6
+    */
+    DBUG_ASSERT(max < min + 1e-6);
+    max= min;
+  }
   return max - min;
 }
 
@@ -1081,12 +1091,14 @@ void Histogram_json_hb::serialize(Field *field)
 }
 
 
+#ifndef DBUG_OFF
 static int SGN(int x)
 {
   if (!x)
     return 0;
   return (x < 0)? -1 : 1;
 }
+#endif
 
 
 /*

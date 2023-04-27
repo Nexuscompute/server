@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2013, Oracle and/or its affiliates.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
   Copyright (c) 2020, 2021, MariaDB Corporation.
 
   This program is free software; you can redistribute it and/or modify
@@ -625,7 +625,7 @@ typedef struct st_mysql_cond mysql_cond_t;
   This function creates both the thread instrumentation and a thread.
   @c mysql_thread_create is a replacement for @c pthread_create.
   The parameter P4 (or, if it is NULL, P1) will be used as the
-  instrumented thread "indentity".
+  instrumented thread "identity".
   Providing a P1 / P4 parameter with a different value for each call
   will on average improve performances, since this thread identity value
   is used internally to randomize access to data and prevent contention.
@@ -1154,6 +1154,13 @@ static inline void inline_mysql_thread_set_psi_THD(THD *thd)
   PSI_THREAD_CALL(set_thread_THD)(psi, thd);
 }
 #endif /* __cplusplus */
+
+static inline void mysql_thread_set_peer_port(uint port __attribute__ ((unused))) {
+#ifdef HAVE_PSI_THREAD_INTERFACE
+  struct PSI_thread *psi = PSI_THREAD_CALL(get_thread)();
+  PSI_THREAD_CALL(set_thread_peer_port)(psi, port);
+#endif
+}
 
 #endif
 

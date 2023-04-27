@@ -410,12 +410,8 @@ static void page_zip_compress_write_log(buf_block_t *block,
 {
   ut_ad(!index->is_ibuf());
 
-  if (mtr->get_log_mode() != MTR_LOG_ALL)
-  {
-    ut_ad(mtr->get_log_mode() == MTR_LOG_NONE ||
-          mtr->get_log_mode() == MTR_LOG_NO_REDO);
+  if (!mtr->is_logged())
     return;
-  }
 
   const page_t *page= block->page.frame;
   const page_zip_des_t *page_zip= &block->page.zip;
@@ -3375,7 +3371,7 @@ page_zip_validate_low(
 				differed.  Let us ignore it. */
 				page_zip_fail(("page_zip_validate:"
 					       " min_rec_flag"
-					       " (%s" ULINTPF "," ULINTPF
+					       " (%s" UINT32PF "," UINT32PF
 					       ",0x%02x)\n",
 					       sloppy ? "ignored, " : "",
 					       page_get_space_id(page),
@@ -3420,7 +3416,8 @@ page_zip_validate_low(
 			page + PAGE_NEW_INFIMUM, TRUE);
 		trec = page_rec_get_next_low(
 			temp_page + PAGE_NEW_INFIMUM, TRUE);
-		const ulint n_core = page_is_leaf(page) ? index->n_fields : 0;
+		const ulint n_core = (index && page_is_leaf(page))
+			? index->n_fields : 0;
 
 		do {
 			if (page_offset(rec) != page_offset(trec)) {
@@ -3978,9 +3975,6 @@ page_zip_write_trx_id_and_roll_ptr(
 	ut_ad(field + DATA_TRX_ID_LEN
 	      == rec_get_nth_field(rec, offsets, trx_id_col + 1, &len));
 	ut_ad(len == DATA_ROLL_PTR_LEN);
-#if defined UNIV_DEBUG || defined UNIV_ZIP_DEBUG
-	ut_a(!memcmp(storage, field, sys_len));
-#endif /* UNIV_DEBUG || UNIV_ZIP_DEBUG */
 	compile_time_assert(DATA_TRX_ID_LEN == 6);
 	mach_write_to_6(field, trx_id);
 	compile_time_assert(DATA_ROLL_PTR_LEN == 7);
@@ -4382,9 +4376,9 @@ IMPORTANT: if page_zip_reorganize() is invoked on a leaf page of a
 non-clustered index, the caller must update the insert buffer free
 bits in the same mini-transaction in such a way that the modification
 will be redo-logged.
-@retval true on success
-@retval false on failure; the block will be left intact */
-bool
+@return error code
+@retval DB_FAIL on overflow; the block_zip will be left intact */
+dberr_t
 page_zip_reorganize(
 	buf_block_t*	block,	/*!< in/out: page with compressed page;
 				on the compressed page, in: size;
@@ -4413,7 +4407,7 @@ page_zip_reorganize(
 	mtr_log_t	log_mode = mtr_set_log_mode(mtr, MTR_LOG_NONE);
 
 	temp_block = buf_block_alloc();
-	btr_search_drop_page_hash_index(block);
+	btr_search_drop_page_hash_index(block, false);
 	temp_page = temp_block->page.frame;
 
 	/* Copy the old page to temporary space */
@@ -4435,20 +4429,22 @@ page_zip_reorganize(
 	/* Copy the records from the temporary space to the recreated page;
 	do not copy the lock bits yet */
 
-	page_copy_rec_list_end_no_locks(block, temp_block,
-					page_get_infimum_rec(temp_page),
-					index, mtr);
+	dberr_t err = page_copy_rec_list_end_no_locks(
+		block, temp_block, page_get_infimum_rec(temp_page),
+		index, mtr);
 
 	/* Copy the PAGE_MAX_TRX_ID or PAGE_ROOT_AUTO_INC. */
 	memcpy_aligned<8>(page + (PAGE_HEADER + PAGE_MAX_TRX_ID),
 			  temp_page + (PAGE_HEADER + PAGE_MAX_TRX_ID), 8);
 	/* PAGE_MAX_TRX_ID must be set on secondary index leaf pages. */
-	ut_ad(dict_index_is_clust(index) || !page_is_leaf(temp_page)
+	ut_ad(err != DB_SUCCESS
+	      || index->is_clust() || !page_is_leaf(temp_page)
 	      || page_get_max_trx_id(page) != 0);
 	/* PAGE_MAX_TRX_ID must be zero on non-leaf pages other than
 	clustered index root pages. */
-	ut_ad(page_get_max_trx_id(page) == 0
-	      || (dict_index_is_clust(index)
+	ut_ad(err != DB_SUCCESS
+	      || page_get_max_trx_id(page) == 0
+	      || (index->is_clust()
 		  ? !page_has_siblings(temp_page)
 		  : page_is_leaf(temp_page)));
 
@@ -4480,14 +4476,13 @@ page_zip_reorganize(
 #endif /* UNIV_DEBUG || UNIV_ZIP_DEBUG */
 		}
 
-		buf_block_free(temp_block);
-		return false;
+		err = DB_FAIL;
+	} else {
+		lock_move_reorganize_page(block, temp_block);
 	}
 
-	lock_move_reorganize_page(block, temp_block);
-
 	buf_block_free(temp_block);
-	return true;
+	return err;
 }
 
 /**********************************************************************//**
@@ -4561,7 +4556,7 @@ page_zip_copy_recs(
 	to the compressed data page. */
 	{
 		page_zip_t*	data = page_zip->data;
-		new (page_zip) page_zip_des_t(*src_zip);
+		new (page_zip) page_zip_des_t(*src_zip, false);
 		page_zip->data = data;
 	}
 	ut_ad(page_zip_get_trailer_len(page_zip, dict_index_is_clust(index))

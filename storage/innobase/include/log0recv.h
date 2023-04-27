@@ -37,11 +37,12 @@ Created 9/20/1997 Heikki Tuuri
 /** @return whether recovery is currently running. */
 #define recv_recovery_is_on() UNIV_UNLIKELY(recv_sys.recovery_on)
 
+ATTRIBUTE_COLD MY_ATTRIBUTE((nonnull, warn_unused_result))
 /** Apply any buffered redo log to a page that was just read from a data file.
 @param[in,out]	space	tablespace
-@param[in,out]	bpage	buffer pool page */
-ATTRIBUTE_COLD void recv_recover_page(fil_space_t* space, buf_page_t* bpage)
-	MY_ATTRIBUTE((nonnull));
+@param[in,out]	bpage	buffer pool page
+@return whether the page was recovered correctly */
+bool recv_recover_page(fil_space_t* space, buf_page_t* bpage);
 
 /** Start recovering from a redo log checkpoint.
 of first system tablespace page
@@ -61,14 +62,23 @@ enum store_t {
 
 /** Report an operation to create, delete, or rename a file during backup.
 @param[in]	space_id	tablespace identifier
-@param[in]	create		whether the file is being created
+@param[in]	type		file operation redo log type
 @param[in]	name		file name (not NUL-terminated)
 @param[in]	len		length of name, in bytes
 @param[in]	new_name	new file name (NULL if not rename)
 @param[in]	new_len		length of new_name, in bytes (0 if NULL) */
-extern void (*log_file_op)(uint32_t space_id, bool create,
+extern void (*log_file_op)(uint32_t space_id, int type,
 			   const byte* name, ulint len,
 			   const byte* new_name, ulint new_len);
+
+/** Report an operation which does undo log tablespace truncation
+during backup
+@param	space_id	undo tablespace identifier */
+extern void (*undo_space_trunc)(uint32_t space_id);
+
+/** Report an operation which does INIT_PAGE for page0 during backup.
+@param	space_id	tablespace identifier */
+extern void (*first_page_init)(uint32_t space_id);
 
 /** Stored redo log record */
 struct log_rec_t
@@ -260,13 +270,16 @@ private:
   @param p        iterator pointing to page_id
   @param mtr      mini-transaction
   @param b        pre-allocated buffer pool block
-  @return whether the page was successfully initialized */
+  @return the recovered block
+  @retval nullptr if the page cannot be initialized based on log records
+  @retval -1      if the page cannot be recovered due to corruption */
   inline buf_block_t *recover_low(const page_id_t page_id, map::iterator &p,
                                   mtr_t &mtr, buf_block_t *b);
   /** Attempt to initialize a page based on redo log records.
   @param page_id  page identifier
   @return the recovered block
-  @retval nullptr if the page cannot be initialized based on log records */
+  @retval nullptr if the page cannot be initialized based on log records
+  @retval -1      if the page cannot be recovered due to corruption */
   buf_block_t *recover_low(const page_id_t page_id);
 
   /** All found log files (multiple ones are possible if we are upgrading
@@ -384,7 +397,8 @@ public:
   /** Attempt to initialize a page based on redo log records.
   @param page_id  page identifier
   @return the recovered block
-  @retval nullptr if the page cannot be initialized based on log records */
+  @retval nullptr if the page cannot be initialized based on log records
+  @retval -1      if the page cannot be recovered due to corruption */
   buf_block_t *recover(const page_id_t page_id)
   {
     return UNIV_UNLIKELY(recovery_on) ? recover_low(page_id) : nullptr;
@@ -416,9 +430,9 @@ extern bool		recv_no_ibuf_operations;
 /** TRUE when recv_init_crash_recovery() has been called. */
 extern bool		recv_needed_recovery;
 #ifdef UNIV_DEBUG
-/** TRUE if writing to the redo log (mtr_commit) is forbidden.
-Protected by log_sys.mutex. */
-extern bool		recv_no_log_write;
+/** whether writing to the redo log is forbidden;
+protected by exclusive log_sys.latch. */
+extern bool recv_no_log_write;
 #endif /* UNIV_DEBUG */
 
 /** TRUE if buf_page_is_corrupted() should check if the log sequence

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2010, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -107,8 +107,7 @@ protected:
 
   table_events_stages_common(const PFS_engine_table_share *share, void *pos);
 
-  ~table_events_stages_common()
-  {}
+  ~table_events_stages_common() = default;
 
   void make_row(PFS_events_stages *stage);
 
@@ -122,6 +121,7 @@ protected:
 class table_events_stages_current : public table_events_stages_common
 {
 public:
+  static PFS_engine_table_share_state m_share_state;
   /** Table share */
   static PFS_engine_table_share m_share;
   static PFS_engine_table* create();
@@ -137,8 +137,7 @@ protected:
   table_events_stages_current();
 
 public:
-  ~table_events_stages_current()
-  {}
+  ~table_events_stages_current() = default;
 
 private:
   friend class table_events_stages_history;
@@ -157,6 +156,7 @@ private:
 class table_events_stages_history : public table_events_stages_common
 {
 public:
+  static PFS_engine_table_share_state m_share_state;
   /** Table share */
   static PFS_engine_table_share m_share;
   static PFS_engine_table* create();
@@ -172,8 +172,7 @@ protected:
   table_events_stages_history();
 
 public:
-  ~table_events_stages_history()
-  {}
+  ~table_events_stages_history() = default;
 
 private:
   /** Table share lock. */
@@ -189,6 +188,7 @@ private:
 class table_events_stages_history_long : public table_events_stages_common
 {
 public:
+  static PFS_engine_table_share_state m_share_state;
   /** Table share */
   static PFS_engine_table_share m_share;
   static PFS_engine_table* create();
@@ -204,8 +204,7 @@ protected:
   table_events_stages_history_long();
 
 public:
-  ~table_events_stages_history_long()
-  {}
+  ~table_events_stages_history_long() = default;
 
 private:
   /** Table share lock. */

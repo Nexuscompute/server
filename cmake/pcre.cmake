@@ -19,12 +19,21 @@ MACRO(BUNDLE_PCRE2)
       SET(intdir)
     ENDIF()
 
-    SET(file ${dir}/src/pcre2-build/${intdir}${CMAKE_STATIC_LIBRARY_PREFIX}${lib}${CMAKE_STATIC_LIBRARY_SUFFIX})
+    # PCRE names static libraries differently depending on platform.
+    # On Windows, but not elsewhere, it adds "-static" to the library name,
+    # or "-staticd".
+    IF(WIN32)
+      SET(PCRE_STATIC "-static")
+    ELSE()
+      SET(PCRE_STATIC "")
+    ENDIF()
+
+    SET(file ${dir}/src/pcre2-build/${intdir}${CMAKE_STATIC_LIBRARY_PREFIX}${lib}${PCRE_STATIC}${CMAKE_STATIC_LIBRARY_SUFFIX})
 
     IF(WIN32)
       # Debug libary name.
       # Same condition as in pcre2 CMakeLists.txt that adds "d"
-      SET(file_d ${dir}/src/pcre2-build/${intdir}${CMAKE_STATIC_LIBRARY_PREFIX}${lib}d${CMAKE_STATIC_LIBRARY_SUFFIX})
+      SET(file_d ${dir}/src/pcre2-build/${intdir}${CMAKE_STATIC_LIBRARY_PREFIX}${lib}${PCRE_STATIC}d${CMAKE_STATIC_LIBRARY_SUFFIX})
       SET_TARGET_PROPERTIES(${lib} PROPERTIES IMPORTED_LOCATION_DEBUG ${file_d})
     ELSE()
       SET(file_d)
@@ -34,6 +43,7 @@ MACRO(BUNDLE_PCRE2)
   ENDFOREACH()
   FOREACH(v "" "_DEBUG" "_RELWITHDEBINFO" "_RELEASE" "_MINSIZEREL")
     STRING(REPLACE "/WX" "" pcre2_flags${v} "${CMAKE_C_FLAGS${v}}")
+    SET(pcre2_flags${v} "${pcre2_flags${v}} -std=c99 ")
     IF(MSVC)
       # Suppress a warning
       STRING(APPEND pcre2_flags${v} " /wd4244 " )
@@ -44,8 +54,8 @@ MACRO(BUNDLE_PCRE2)
   ExternalProject_Add(
     pcre2
     PREFIX   "${dir}"
-    URL      "https://github.com/PhilipHazel/pcre2/releases/download/pcre2-10.37/pcre2-10.37.zip"
-    URL_MD5  8c1699a725d4b28410adf4b964ebbcb7
+    URL "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.42/pcre2-10.42.zip"
+    URL_MD5 fe90992fbfb03f854bd9f344074f49eb
     INSTALL_COMMAND ""
     CMAKE_ARGS
       "-DCMAKE_WARN_DEPRECATED=FALSE"

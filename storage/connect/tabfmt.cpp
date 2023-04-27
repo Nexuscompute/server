@@ -62,6 +62,7 @@
 #define  NO_FUNC
 #include "plgcnx.h"                       // For DB types
 #include "resource.h"
+#include "m_string.h"
 
 /***********************************************************************/
 /*  This should be an option.                                          */
@@ -137,7 +138,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
 			              ? strchr(tdp->Entry, '*') || strchr(tdp->Entry, '?')
 			              : GetBooleanTableOption(g, topt, "Mulentries", false);
 #else   // !ZIP_SUPPORT
-		strcpy(g->Message, "ZIP not supported by this version");
+		safe_strcpy(g->Message, sizeof(g->Message), "ZIP not supported by this version");
 		return NULL;
 #endif  // !ZIP_SUPPORT
 	} // endif // Zipped
@@ -145,7 +146,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
 	fn = tdp->Fn = GetStringTableOption(g, topt, "Filename", NULL);
 
 	if (!tdp->Fn) {
-		strcpy(g->Message, MSG(MISSING_FNAME));
+		safe_strcpy(g->Message, sizeof(g->Message), MSG(MISSING_FNAME));
 		return NULL;
 	} // endif Fn
 
@@ -230,7 +231,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
 
       colname[0] = p;
     } else if (rc == RC_EF) {
-      sprintf(g->Message, MSG(FILE_IS_EMPTY), fn);
+      snprintf(g->Message, sizeof(g->Message), MSG(FILE_IS_EMPTY), fn);
       goto err;
 		} else
 			goto err;
@@ -269,10 +270,10 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
     /*******************************************************************/
 		if ((rc = tdbp->ReadDB(g)) == RC_OK) {
     } else if (rc == RC_EF) {
-      sprintf(g->Message, MSG(EOF_AFTER_LINE), num_read -1);
+      snprintf(g->Message, sizeof(g->Message), MSG(EOF_AFTER_LINE), num_read -1);
       break;
     } else {
-      sprintf(g->Message, MSG(ERR_READING_REC), num_read, fn);
+      snprintf(g->Message, sizeof(g->Message), MSG(ERR_READING_REC), num_read, fn);
       goto err;
     } // endif's
 
@@ -285,7 +286,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
       if (*p == sep) {
         if (phase != 1) {
           if (i == MAXCOL - 1) {
-            sprintf(g->Message, MSG(TOO_MANY_FIELDS), num_read, fn);
+            snprintf(g->Message, sizeof(g->Message), MSG(TOO_MANY_FIELDS), num_read, fn);
             goto err;
             } // endif i
 
@@ -313,7 +314,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
         if (phase == 0) {
           if (blank) {
             if (++nerr > mxr) {
-              sprintf(g->Message, MSG(MISPLACED_QUOTE), num_read);
+              snprintf(g->Message, sizeof(g->Message), MSG(MISPLACED_QUOTE), num_read);
               goto err;
             } else
               goto skip;
@@ -325,7 +326,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
           if (*(p+1) == q) {
             // This is currently not implemented for CSV tables
 //          if (++nerr > mxr) {
-//            sprintf(g->Message, MSG(QUOTE_IN_QUOTE), num_read);
+//            snprintf(g->Message, sizeof(g->Message), MSG(QUOTE_IN_QUOTE), num_read);
 //            goto err;
 //          } else
 //            goto skip;
@@ -336,7 +337,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
             phase = 2;
 
         } else if (++nerr > mxr) {      // phase == 2
-          sprintf(g->Message, MSG(MISPLACED_QUOTE), num_read);
+          snprintf(g->Message, sizeof(g->Message), MSG(MISPLACED_QUOTE), num_read);
           goto err;
         } else
           goto skip;
@@ -344,7 +345,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
       } else {
         if (phase == 2) {
           if (++nerr > mxr) {
-            sprintf(g->Message, MSG(MISPLACED_QUOTE), num_read);
+            snprintf(g->Message, sizeof(g->Message), MSG(MISPLACED_QUOTE), num_read);
             goto err;
           } else
             goto skip;
@@ -366,7 +367,7 @@ PQRYRES CSVColumns(PGLOBAL g, PCSZ dp, PTOS topt, bool info)
 
     if (phase == 1) {
       if (++nerr > mxr) {
-        sprintf(g->Message, MSG(UNBALANCE_QUOTE), num_read);
+        snprintf(g->Message, sizeof(g->Message), MSG(UNBALANCE_QUOTE), num_read);
         goto err;
       } else
         goto skip;
@@ -472,7 +473,7 @@ bool CSVDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
   if (Catfunc == FNC_NO)
     for (PCOLDEF cdp = To_Cols; cdp; cdp = cdp->GetNext())
       if (cdp->GetOffset() < 1 && !cdp->IsSpecial()) {
-        strcpy(g->Message, MSG(BAD_OFFSET_VAL));
+        safe_strcpy(g->Message, sizeof(g->Message), MSG(BAD_OFFSET_VAL));
         return true;
         } // endif Offset
 
@@ -528,11 +529,11 @@ PTDB CSVDEF::GetTable(PGLOBAL g, MODE mode)
 			} else if (mode == MODE_INSERT) {
 				txfp = new(g) ZIPFAM(this);
 			} else {
-				strcpy(g->Message, "UPDATE/DELETE not supported for ZIP");
+				safe_strcpy(g->Message, sizeof(g->Message), "UPDATE/DELETE not supported for ZIP");
 				return NULL;
 			}	// endif's mode
 #else   // !ZIP_SUPPORT
-			strcpy(g->Message, "ZIP not supported");
+			safe_strcpy(g->Message, sizeof(g->Message), "ZIP not supported");
 			return NULL;
 #endif  // !ZIP_SUPPORT
 		} else if (map) {
@@ -546,7 +547,7 @@ PTDB CSVDEF::GetTable(PGLOBAL g, MODE mode)
         txfp = new(g) ZLBFAM(this);
 
 #else   // !GZ_SUPPORT
-        strcpy(g->Message, "Compress not supported");
+        safe_strcpy(g->Message, sizeof(g->Message), "Compress not supported");
         return NULL;
 #endif  // !GZ_SUPPORT
     } else
@@ -583,7 +584,7 @@ PTDB CSVDEF::GetTable(PGLOBAL g, MODE mode)
               ((PZLBFAM)txfp)->SetOptimized(To_Pos != NULL);
               } // endelse
 #else
-            sprintf(g->Message, MSG(NO_FEAT_SUPPORT), "GZ");
+            snprintf(g->Message, sizeof(g->Message), MSG(NO_FEAT_SUPPORT), "GZ");
             return NULL;
 #endif
           } else
@@ -864,7 +865,7 @@ bool TDBCSV::SkipHeader(PGLOBAL g)
           } // endfor cdp
 
         if (hlen > Lrecl) {
-          sprintf(g->Message, MSG(LRECL_TOO_SMALL), hlen);
+          snprintf(g->Message, sizeof(g->Message), MSG(LRECL_TOO_SMALL), hlen);
           return true;
           } // endif hlen
 
@@ -878,7 +879,7 @@ bool TDBCSV::SkipHeader(PGLOBAL g)
               if (q)
                 To_Line[strlen(To_Line)] = Qot;
 
-              strcat(To_Line, cdp->GetName());
+              safe_strcat(To_Line, Lrecl, cdp->GetName());
 
               if (q)
                 To_Line[strlen(To_Line)] = Qot;
@@ -948,7 +949,7 @@ int TDBCSV::ReadBuffer(PGLOBAL g)
 
           if (*p != Sep && i != Fields - 1) { // Should be the separator
             if (CheckErr()) {
-              sprintf(g->Message, MSG(MISSING_FIELD),
+              snprintf(g->Message, sizeof(g->Message), MSG(MISSING_FIELD),
                                   i+1, Name, RowNumber(g));
               return RC_FX;
             } else if (Accept)
@@ -975,7 +976,7 @@ int TDBCSV::ReadBuffer(PGLOBAL g)
             } // endif n
 
         } else if (CheckErr()) {
-          sprintf(g->Message, MSG(BAD_QUOTE_FIELD),
+          snprintf(g->Message, sizeof(g->Message), MSG(BAD_QUOTE_FIELD),
                               Name, i+1, RowNumber(g));
           return RC_FX;
         } else if (Accept) {
@@ -992,7 +993,7 @@ int TDBCSV::ReadBuffer(PGLOBAL g)
         len = strlen(p2);
         bad = true;
       } else if (CheckErr()) {
-        sprintf(g->Message, MSG(MISSING_FIELD), i+1, Name, RowNumber(g));
+        snprintf(g->Message, sizeof(g->Message), MSG(MISSING_FIELD), i+1, Name, RowNumber(g));
         return RC_FX;
       } else if (Accept) {
         len = strlen(p2);
@@ -1008,7 +1009,7 @@ int TDBCSV::ReadBuffer(PGLOBAL g)
     if (Mode != MODE_UPDATE)
       Fldlen[i] = len;
     else if (len > Fldlen[i]) {
-      sprintf(g->Message, MSG(FIELD_TOO_LONG), i+1, RowNumber(g));
+      snprintf(g->Message, sizeof(g->Message), MSG(FIELD_TOO_LONG), i+1, RowNumber(g));
       return RC_FX;
     } else {
       strncpy(Field[i], p2, len);
@@ -1048,14 +1049,16 @@ bool TDBCSV::PrepareWriting(PGLOBAL g)
 
   for (i = 0; i < Fields; i++) {
     if (i)
-      strcat(To_Line, sep);
+      safe_strcat(To_Line, Lrecl, sep);
 
     if (Field[i]) {
       if (!strlen(Field[i])) {
         // Generally null fields are not quoted
-        if (Quoted > 2)
-          // Except if explicitely required
-          strcat(strcat(To_Line, qot), qot);
+        if (Quoted > 2) {
+          // Except if explicitly required
+          safe_strcat(To_Line, Lrecl, qot);
+          safe_strcat(To_Line, Lrecl, qot);
+        }
 
       } else if (Qot && (strchr(Field[i], Sep) || *Field[i] == Qot
               || Quoted > 1 || (Quoted == 1 && !Fldtyp[i]))) {
@@ -1074,12 +1077,15 @@ bool TDBCSV::PrepareWriting(PGLOBAL g)
 
           To_Line[k++] = Qot;
           To_Line[k] = '\0';
-        } else
-          strcat(strcat(strcat(To_Line, qot), Field[i]), qot);
+        } else {
+          safe_strcat(To_Line, Lrecl, qot);
+          safe_strcat(To_Line, Lrecl, Field[i]);
+          safe_strcat(To_Line, Lrecl, qot);
+        }
       }
 
       else
-        strcat(To_Line, Field[i]);
+        safe_strcat(To_Line, Lrecl, Field[i]);
     }
   } // endfor i
 
@@ -1143,7 +1149,7 @@ int TDBCSV::CheckWrite(PGLOBAL g)
           || Quoted > 1 || (Quoted == 1 && !Fldtyp[i]))
       {
         if (!Qot) {
-          sprintf(g->Message, MSG(SEP_IN_FIELD), i + 1);
+          snprintf(g->Message, sizeof(g->Message), MSG(SEP_IN_FIELD), i + 1);
           return -1;
         } else {
           // Quotes inside a quoted field must be doubled
@@ -1156,7 +1162,7 @@ int TDBCSV::CheckWrite(PGLOBAL g)
         } // endif
       }
       if ((nlen += n) > maxlen) {
-        strcpy(g->Message, MSG(LINE_TOO_LONG));
+        safe_strcpy(g->Message, sizeof(g->Message), MSG(LINE_TOO_LONG));
         return -1;
         } // endif nlen
 
@@ -1225,7 +1231,7 @@ bool TDBFMT::OpenDB(PGLOBAL g)
   Linenum = 0;
 
   if (Mode == MODE_INSERT || Mode == MODE_UPDATE) {
-    sprintf(g->Message, MSG(FMT_WRITE_NIY), "FMT");
+    snprintf(g->Message, sizeof(g->Message), MSG(FMT_WRITE_NIY), "FMT");
     return true;                    // NIY
     } // endif Mode
 
@@ -1255,18 +1261,18 @@ bool TDBFMT::OpenDB(PGLOBAL g)
       if (!cdp->IsSpecial() && !cdp->IsVirtual() 
                             && (i = cdp->GetOffset() - 1) < Fields) {
         if (!(pfm = cdp->GetFmt())) {
-          sprintf(g->Message, MSG(NO_FLD_FORMAT), i + 1, Name);
+          snprintf(g->Message, sizeof(g->Message), MSG(NO_FLD_FORMAT), i + 1, Name);
           return true;
           } // endif pfm
 
         // Roughly check the Fmt format
         if ((n = strlen(pfm) - 2) < 4) {
-          sprintf(g->Message, MSG(BAD_FLD_FORMAT), i + 1, Name);
+          snprintf(g->Message, sizeof(g->Message), MSG(BAD_FLD_FORMAT), i + 1, Name);
           return true;
           } // endif n
 
         FldFormat[i] = (PSZ)PlugSubAlloc(g, NULL, n + 5);
-        strcpy(FldFormat[i], pfm);
+        safe_strcpy(FldFormat[i], n + 5, pfm);
 
         if (!strcmp(pfm + n, "%m")) {
           // This is a field that can be missing. Flag it so it can
@@ -1276,7 +1282,7 @@ bool TDBFMT::OpenDB(PGLOBAL g)
         } else if (i+1 < Fields && strcmp(pfm + n, "%n")) {
           // There are trailing characters after the field contents
           // add a marker for the next field start position.
-          strcat(FldFormat[i], "%n");
+          safe_strcat(FldFormat[i], n + 5, "%n");
           FmtTest[i] = 1;
         } // endif's
 
@@ -1338,7 +1344,7 @@ int TDBFMT::ReadBuffer(PGLOBAL g)
         sscanf("a", "%*c");       // Seems to reset things Ok
 
         if (CheckErr()) {
-          sprintf(g->Message, MSG(BAD_LINEFLD_FMT), Linenum, i + 1, Name);
+          snprintf(g->Message, sizeof(g->Message), MSG(BAD_LINEFLD_FMT), Linenum, i + 1, Name);
           return RC_FX;
         } else if (Accept)
           bad = true;
@@ -1361,7 +1367,7 @@ int TDBFMT::ReadBuffer(PGLOBAL g)
 //  if (Mode != MODE_UPDATE)
       Fldlen[i] = len;
 //  else if (len > Fldlen[i]) {
-//    sprintf(g->Message, MSG(FIELD_TOO_LONG), i+1, To_Tdb->RowNumber(g));
+//    snprintf(g->Message, sizeof(g->Message), MSG(FIELD_TOO_LONG), i+1, To_Tdb->RowNumber(g));
 //    return RC_FX;
 //  } else {
 //    strncpy(Field[i], To_Line + pos, len);
@@ -1384,7 +1390,7 @@ int TDBFMT::ReadBuffer(PGLOBAL g)
 /***********************************************************************/
 int TDBFMT::WriteDB(PGLOBAL g)
   {
-  sprintf(g->Message, MSG(FMT_WRITE_NIY), "FMT");
+  snprintf(g->Message, sizeof(g->Message), MSG(FMT_WRITE_NIY), "FMT");
   return RC_FX;                    // NIY
   } // end of WriteDB
 
@@ -1443,7 +1449,7 @@ void CSVCOL::ReadColumn(PGLOBAL g)
   if (!tdbp->IsRead())
     if ((rc = tdbp->ReadBuffer(g)) != RC_OK) {
       if (rc == RC_EF)
-        sprintf(g->Message, MSG(INV_DEF_READ), rc);
+        snprintf(g->Message, sizeof(g->Message), MSG(INV_DEF_READ), rc);
 
 			throw 34;
 		} // endif
@@ -1461,7 +1467,7 @@ void CSVCOL::ReadColumn(PGLOBAL g)
 
     if (Long > colen && tdbp->CheckErr()) {
       Long = colen;                       // Restore column length
-      sprintf(g->Message, MSG(FLD_TOO_LNG_FOR),
+      snprintf(g->Message, sizeof(g->Message), MSG(FLD_TOO_LNG_FOR),
               Fldnum + 1, Name, To_Tdb->RowNumber(g), tdbp->GetFile(g));
 			throw 34;
 		} // endif Long
@@ -1525,7 +1531,7 @@ void CSVCOL::WriteColumn(PGLOBAL g)
     htrc("new length(%p)=%d\n", p, n);
 
   if (n > flen) {
-    sprintf(g->Message, MSG(BAD_FLD_LENGTH), Name, p, n,
+    snprintf(g->Message, sizeof(g->Message), MSG(BAD_FLD_LENGTH), Name, p, n,
                         tdbp->RowNumber(g), tdbp->GetFile(g));
 		throw 34;
 	} else if (Dsp)
@@ -1542,7 +1548,7 @@ void CSVCOL::WriteColumn(PGLOBAL g)
   /*********************************************************************/
   if (Fldnum < 0) {
     // This can happen for wrong offset value in XDB files
-    sprintf(g->Message, MSG(BAD_FIELD_RANK), Fldnum + 1, Name);
+    snprintf(g->Message, sizeof(g->Message), MSG(BAD_FIELD_RANK), Fldnum + 1, Name);
 		throw 34;
 	} else
     strncpy(tdbp->Field[Fldnum], p, flen);

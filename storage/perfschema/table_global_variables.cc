@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2018, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,6 +35,11 @@
 
 THR_LOCK table_global_variables::m_table_lock;
 
+PFS_engine_table_share_state
+table_global_variables::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_global_variables::m_share=
 {
@@ -49,7 +54,8 @@ table_global_variables::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE global_variables("
   "VARIABLE_NAME VARCHAR(64) not null,"
   "VARIABLE_VALUE VARCHAR(1024))") },
-  true   /* perpetual */
+  true, /* m_perpetual */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -124,7 +130,7 @@ int table_global_variables::rnd_pos(const void *pos)
     return HA_ERR_RECORD_DELETED;
 
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < m_sysvar_cache.size());
+  assert(m_pos.m_index < m_sysvar_cache.size());
 
   const System_variable *system_var= m_sysvar_cache.get(m_pos.m_index);
   if (system_var != NULL)
@@ -158,7 +164,7 @@ int table_global_variables
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -174,7 +180,7 @@ int table_global_variables
         m_row.m_variable_value.set_field(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

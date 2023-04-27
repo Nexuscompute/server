@@ -134,6 +134,8 @@ IF(UNIX)
   IF(NOT LIBRT)
     MY_SEARCH_LIBS(clock_gettime rt LIBRT)
   ENDIF()
+  MY_SEARCH_LIBS(backtrace_symbols_fd execinfo LIBEXECINFO)
+
   set(THREADS_PREFER_PTHREAD_FLAG ON)
   FIND_PACKAGE(Threads)
 
@@ -405,7 +407,6 @@ CHECK_FUNCTION_EXISTS (sigwait HAVE_SIGWAIT)
 CHECK_FUNCTION_EXISTS (sigwaitinfo HAVE_SIGWAITINFO)
 CHECK_FUNCTION_EXISTS (sigset HAVE_SIGSET)
 CHECK_FUNCTION_EXISTS (sleep HAVE_SLEEP)
-CHECK_FUNCTION_EXISTS (snprintf HAVE_SNPRINTF)
 CHECK_FUNCTION_EXISTS (stpcpy HAVE_STPCPY)
 CHECK_FUNCTION_EXISTS (strcoll HAVE_STRCOLL)
 CHECK_FUNCTION_EXISTS (strerror HAVE_STRERROR)
@@ -421,7 +422,6 @@ CHECK_FUNCTION_EXISTS (thr_setconcurrency HAVE_THR_SETCONCURRENCY)
 CHECK_FUNCTION_EXISTS (thr_yield HAVE_THR_YIELD)
 CHECK_FUNCTION_EXISTS (vasprintf HAVE_VASPRINTF)
 CHECK_FUNCTION_EXISTS (vsnprintf HAVE_VSNPRINTF)
-CHECK_FUNCTION_EXISTS (memalign HAVE_MEMALIGN)
 CHECK_FUNCTION_EXISTS (nl_langinfo HAVE_NL_LANGINFO)
 
 IF(HAVE_SYS_EVENT_H)
@@ -863,9 +863,16 @@ MARK_AS_ADVANCED(NO_ALARM)
 CHECK_CXX_SOURCE_COMPILES("
 int main()
 {
-  long long int var= 1;
-  long long int *ptr= &var;
-  return (int)__atomic_load_n(ptr, __ATOMIC_SEQ_CST);
+  char x=1;
+  short y=1;
+  int z=1;
+  long w = 1;
+  long long s = 1;
+  x = __atomic_add_fetch(&x, 1, __ATOMIC_SEQ_CST);
+  y = __atomic_add_fetch(&y, 1, __ATOMIC_SEQ_CST);
+  z = __atomic_add_fetch(&z, 1, __ATOMIC_SEQ_CST);
+  w = __atomic_add_fetch(&w, 1, __ATOMIC_SEQ_CST);
+  return (int)__atomic_load_n(&s, __ATOMIC_SEQ_CST);
 }"
 HAVE_GCC_C11_ATOMICS_WITHOUT_LIBATOMIC)
 IF (HAVE_GCC_C11_ATOMICS_WITHOUT_LIBATOMIC)
@@ -876,9 +883,16 @@ ELSE()
   CHECK_CXX_SOURCE_COMPILES("
   int main()
   {
-    long long int var= 1;
-    long long int *ptr= &var;
-    return (int)__atomic_load_n(ptr, __ATOMIC_SEQ_CST);
+    char x=1;
+    short y=1;
+    int z=1;
+    long w = 1;
+    long long s = 1;
+    x = __atomic_add_fetch(&x, 1, __ATOMIC_SEQ_CST);
+    y = __atomic_add_fetch(&y, 1, __ATOMIC_SEQ_CST);
+    z = __atomic_add_fetch(&z, 1, __ATOMIC_SEQ_CST);
+    w = __atomic_add_fetch(&w, 1, __ATOMIC_SEQ_CST);
+    return (int)__atomic_load_n(&s, __ATOMIC_SEQ_CST);
   }"
   HAVE_GCC_C11_ATOMICS_WITH_LIBATOMIC)
   IF(HAVE_GCC_C11_ATOMICS_WITH_LIBATOMIC)
@@ -968,4 +982,20 @@ IF(NOT MSVC)
   }"
   HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE
   )
+ENDIF()
+
+MY_CHECK_C_COMPILER_FLAG("-Werror")
+IF(have_C__Werror)
+  SET(SAVE_CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+  SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
+  CHECK_C_SOURCE_COMPILES("
+    #include <unistd.h>
+    int main()
+    {
+      pid_t pid=vfork();
+      return (int)pid;
+    }"
+    HAVE_VFORK
+  )
+  SET(CMAKE_REQUIRED_FLAGS ${SAVE_CMAKE_REQUIRED_FLAGS})
 ENDIF()

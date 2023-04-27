@@ -33,6 +33,8 @@
 #include <fcntl.h>
 #endif  // !_WIN32
 
+#include <m_string.h>
+
 /***********************************************************************/
 /*  Include application header files:                                  */
 /*  global.h    is header containing all global declarations.          */
@@ -90,9 +92,9 @@ int GZFAM::Zerror(PGLOBAL g)
 
   if (errnum == Z_ERRNO)
 #if defined(_WIN32)
-    sprintf(g->Message, MSG(READ_ERROR), To_File, strerror(NULL));
+    snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, strerror(NULL));
 #else   // !_WIN32
-    sprintf(g->Message, MSG(READ_ERROR), To_File, strerror(errno));
+    snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, strerror(errno));
 #endif  // !_WIN32
 
     return (errnum == Z_STREAM_END) ? RC_EF : RC_FX;
@@ -128,12 +130,13 @@ int GZFAM::GetFileLength(PGLOBAL g)
 /***********************************************************************/
 bool GZFAM::OpenTableFile(PGLOBAL g)
   {
-  char    opmode[4], filename[_MAX_PATH];
-  MODE    mode = Tdbp->GetMode();
+  const char *opmode;
+  char filename[_MAX_PATH];
+  MODE mode = Tdbp->GetMode();
 
   switch (mode) {
     case MODE_READ:
-      strcpy(opmode, "r");
+      opmode = "rb";
       break;
     case MODE_UPDATE:
       /*****************************************************************/
@@ -147,21 +150,21 @@ bool GZFAM::OpenTableFile(PGLOBAL g)
         DelRows = Cardinality(g);
 
         // This will erase the entire file
-        strcpy(opmode, "w");
+        opmode = "wb";
 //      Block = 0;                // For ZBKFAM
 //      Last = Nrec;              // For ZBKFAM
         Tdbp->ResetSize();
       } else {
-        sprintf(g->Message, MSG(NO_PART_DEL), "GZ");
+        snprintf(g->Message, sizeof(g->Message), MSG(NO_PART_DEL), "GZ");
         return true;
       } // endif filter
 
       break;
     case MODE_INSERT:
-      strcpy(opmode, "a+");
+      opmode = "a+b";
       break;
     default:
-      sprintf(g->Message, MSG(BAD_OPEN_MODE), mode);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_OPEN_MODE), mode);
       return true;
     } // endswitch Mode
 
@@ -170,13 +173,11 @@ bool GZFAM::OpenTableFile(PGLOBAL g)
   /*  Use specific zlib functions.                                     */
   /*  Treat files as binary.                                           */
   /*********************************************************************/
-  strcat(opmode, "b");
   Zfile = gzopen(PlugSetPath(filename, To_File, Tdbp->GetPath()), opmode);
 
   if (Zfile == NULL) {
-    sprintf(g->Message, MSG(GZOPEN_ERROR),
-            opmode, (int)errno, filename);
-    strcat(strcat(g->Message, ": "), strerror(errno));
+    snprintf(g->Message, sizeof(g->Message), MSG(GZOPEN_ERROR) ": %s",
+            opmode, (int)errno, filename, strerror(errno));
     return (mode == MODE_READ && errno == ENOENT)
             ? PushWarning(g, Tdbp) : true;
     } // endif Zfile
@@ -249,13 +250,13 @@ int GZFAM::GetNextPos(void)
 /***********************************************************************/
 bool GZFAM::SetPos(PGLOBAL g, int pos __attribute__((unused)))
   {
-  sprintf(g->Message, MSG(NO_SETPOS_YET), "GZ");
+  snprintf(g->Message, sizeof(g->Message), MSG(NO_SETPOS_YET), "GZ");
   return true;
 #if 0
   Fpos = pos;
 
   if (fseek(Stream, Fpos, SEEK_SET)) {
-    sprintf(g->Message, MSG(FSETPOS_ERROR), Fpos);
+    snprintf(g->Message, sizeof(g->Message), MSG(FSETPOS_ERROR), Fpos);
     return true;
     } // endif
 
@@ -655,7 +656,7 @@ int ZBKFAM::DeleteRecords(PGLOBAL g, int irc)
 
     if (!defp->SetIntCatInfo("Blocks", 0) ||
         !defp->SetIntCatInfo("Last", 0)) {
-      sprintf(g->Message, MSG(UPDATE_ERROR), "Header");
+      snprintf(g->Message, sizeof(g->Message), MSG(UPDATE_ERROR), "Header");
       return RC_FX;
     } else
       return RC_OK;
@@ -932,7 +933,7 @@ bool ZLBFAM::AllocateBuffer(PGLOBAL g)
 
 #if defined(NOLIB)
   if (!zlib && LoadZlib()) {
-    sprintf(g->Message, MSG(DLL_LOAD_ERROR), GetLastError(), "zlib.dll");
+    snprintf(g->Message, sizeof(g->Message), MSG(DLL_LOAD_ERROR), GetLastError(), "zlib.dll");
     return TRUE;
     } // endif zlib
 #endif
@@ -964,9 +965,9 @@ bool ZLBFAM::AllocateBuffer(PGLOBAL g)
 
   if (zrc != Z_OK) {
     if (Zstream->msg)
-      sprintf(g->Message, "%s error: %s", msg, Zstream->msg);
+      snprintf(g->Message, sizeof(g->Message), "%s error: %s", msg, Zstream->msg);
     else
-      sprintf(g->Message, "%s error: %d", msg, zrc);
+      snprintf(g->Message, sizeof(g->Message), "%s error: %d", msg, zrc);
 
     return TRUE;
     } // endif zrc
@@ -1017,9 +1018,9 @@ bool ZLBFAM::AllocateBuffer(PGLOBAL g)
         return FALSE;
       case RC_FX:
 #if defined(UNIX)
-        sprintf(g->Message, MSG(READ_ERROR), To_File, strerror(errno));
+        snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, strerror(errno));
 #else
-        sprintf(g->Message, MSG(READ_ERROR), To_File, _strerror(NULL));
+        snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, _strerror(NULL));
 #endif
         /* falls through */
       case RC_NF:
@@ -1028,7 +1029,7 @@ bool ZLBFAM::AllocateBuffer(PGLOBAL g)
 
     // Some old tables can have PlugDB in their header
     if (strcmp(To_Buf, "PlugDB")) {
-      sprintf(g->Message, MSG(BAD_HEADER), Tdbp->GetFile(g));
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_HEADER), Tdbp->GetFile(g));
       return TRUE;
       } // endif strcmp
 
@@ -1063,7 +1064,7 @@ int ZLBFAM::GetNextPos(void)
 /***********************************************************************/
 bool ZLBFAM::SetPos(PGLOBAL g, int pos __attribute__((unused)))
   {
-  sprintf(g->Message, MSG(NO_SETPOS_YET), "GZ");
+  snprintf(g->Message, sizeof(g->Message), MSG(NO_SETPOS_YET), "GZ");
   return true;
 #if 0 // All this must be checked
   if (pos < 0) {
@@ -1146,7 +1147,7 @@ int ZLBFAM::ReadBuffer(PGLOBAL g)
     // fseek is required only in non sequential reading
     if (CurBlk != OldBlk + 1)
       if (fseek(Stream, Fpos, SEEK_SET)) {
-        sprintf(g->Message, MSG(FSETPOS_ERROR), Fpos);
+        snprintf(g->Message, sizeof(g->Message), MSG(FSETPOS_ERROR), Fpos);
         return RC_FX;
         } // endif fseek
 
@@ -1208,9 +1209,9 @@ int ZLBFAM::ReadBuffer(PGLOBAL g)
 
  err:
 #if defined(UNIX)
-  sprintf(g->Message, MSG(READ_ERROR), To_File, strerror(errno));
+  snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, strerror(errno));
 #else
-  sprintf(g->Message, MSG(READ_ERROR), To_File, _strerror(NULL));
+  snprintf(g->Message, sizeof(g->Message), MSG(READ_ERROR), To_File, _strerror(NULL));
 #endif
   return RC_FX;
   } // end of ReadBuffer
@@ -1226,7 +1227,7 @@ int ZLBFAM::ReadCompressedBuffer(PGLOBAL g, void *rdbuf)
     num_read++;
 
     if (Optimized && BlkLen != signed(*Zlenp + sizeof(int))) {
-      sprintf(g->Message, MSG(BAD_BLK_SIZE), CurBlk + 1);
+      snprintf(g->Message, sizeof(g->Message), MSG(BAD_BLK_SIZE), CurBlk + 1);
       return RC_NF;
       } // endif BlkLen
 
@@ -1239,9 +1240,9 @@ int ZLBFAM::ReadCompressedBuffer(PGLOBAL g, void *rdbuf)
 
     if (zrc != Z_OK) {
       if (Zstream->msg)
-        sprintf(g->Message, MSG(FUNC_ERR_S), "inflate", Zstream->msg);
+        snprintf(g->Message, sizeof(g->Message), MSG(FUNC_ERR_S), "inflate", Zstream->msg);
       else
-        sprintf(g->Message, MSG(FUNCTION_ERROR), "inflate", (int)zrc);
+        snprintf(g->Message, sizeof(g->Message), MSG(FUNCTION_ERROR), "inflate", (int)zrc);
 
       return RC_NF;
       } // endif zrc
@@ -1329,9 +1330,9 @@ bool ZLBFAM::WriteCompressedBuffer(PGLOBAL g)
 
   if (zrc != Z_OK) {
     if (Zstream->msg)
-      sprintf(g->Message, MSG(FUNC_ERR_S), "deflate", Zstream->msg);
+      snprintf(g->Message, sizeof(g->Message), MSG(FUNC_ERR_S), "deflate", Zstream->msg);
     else
-      sprintf(g->Message, MSG(FUNCTION_ERROR), "deflate", (int)zrc);
+      snprintf(g->Message, sizeof(g->Message), MSG(FUNCTION_ERROR), "deflate", (int)zrc);
 
     return TRUE;
   } else
@@ -1341,7 +1342,7 @@ bool ZLBFAM::WriteCompressedBuffer(PGLOBAL g)
   BlkLen = *Zlenp + sizeof(int);
 
   if (fwrite(Zlenp, 1, BlkLen, Stream) != (size_t)BlkLen) {
-    sprintf(g->Message, MSG(FWRITE_ERROR), strerror(errno));
+    snprintf(g->Message, sizeof(g->Message), MSG(FWRITE_ERROR), strerror(errno));
     return TRUE;
     } // endif size
 

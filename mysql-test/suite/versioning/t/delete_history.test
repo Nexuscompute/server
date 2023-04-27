@@ -2,6 +2,9 @@
 --source include/have_partition.inc
 --source suite/versioning/engines.inc
 
+set @saved_frequency= @@global.innodb_purge_rseg_truncate_frequency;
+set global innodb_purge_rseg_truncate_frequency= 1;
+
 call mtr.add_suppression("need more HISTORY partitions");
 
 create table t (a int);
@@ -63,8 +66,8 @@ partition by system_time limit 1 partitions 3;
 insert into t values (1);
 update t set a= 2;
 update t set a= 3;
+--echo # You see warning above ^
 delete history from t;
---echo # The above warning is one command late (MDEV-20345) ^^^
 select * from t for system_time all;
 
 --echo # VIEW
@@ -190,5 +193,43 @@ execute stmt;
 select * from t1;
 drop prepare stmt;
 drop table t1;
+
+--echo #
+--echo # MDEV-25004 Missing row in FTS_DOC_ID_INDEX during DELETE HISTORY
+--echo #
+create table t1 (a integer, c0 varchar(255), fulltext key (c0))
+with system versioning engine innodb;
+set system_versioning_alter_history= keep;
+alter table t1 drop system versioning;
+alter table t1 add system versioning;
+insert into t1 values (1, 'politician');
+update t1 set c0= 'criminal';
+--source suite/innodb/include/wait_all_purged.inc
+delete history from t1;
+drop table t1;
+
+create table t1 (id int primary key, ftx varchar(255))
+with system versioning engine innodb;
+insert into t1 values (1, 'c');
+delete from t1;
+alter table t1 add fulltext key(ftx);
+drop table t1;
+
+set global innodb_purge_rseg_truncate_frequency= @saved_frequency;
+
+--echo #
+--echo # MDEV-28201 Server crashes upon SHOW ANALYZE/EXPLAIN FORMAT=JSON
+--echo #
+CREATE TABLE t1 (a INT) WITH SYSTEM VERSIONING;
+CREATE ALGORITHM=TEMPTABLE VIEW v1 AS SELECT * FROM t1;
+SET optimizer_trace= 'enabled=on';
+--error ER_NON_UPDATABLE_TABLE
+DELETE HISTORY FROM v1 BEFORE SYSTEM_TIME '2021-01-01';
+--error ER_NON_UPDATABLE_TABLE
+DELETE HISTORY FROM v1;
+DROP VIEW v1;
+DROP TABLE t1;
+
+--echo # End of 10.4 tests
 
 --source suite/versioning/common_finish.inc

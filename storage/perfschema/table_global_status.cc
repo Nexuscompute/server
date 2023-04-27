@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,6 +35,11 @@
 
 THR_LOCK table_global_status::m_table_lock;
 
+PFS_engine_table_share_state
+table_global_status::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_global_status::m_share=
 {
@@ -49,7 +54,9 @@ table_global_status::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE global_status("
   "VARIABLE_NAME VARCHAR(64) not null comment 'The global status variable name.',"
   "VARIABLE_VALUE VARCHAR(1024) comment 'The global status variable value.')") },
-  true   /* perpetual */
+  true, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -164,7 +171,7 @@ int table_global_status
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -180,7 +187,7 @@ int table_global_status
         m_row.m_variable_value.set_field(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

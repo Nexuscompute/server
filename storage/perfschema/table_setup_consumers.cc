@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -131,6 +131,11 @@ static row_setup_consumers all_setup_consumers_data[COUNT_SETUP_CONSUMERS]=
 
 THR_LOCK table_setup_consumers::m_table_lock;
 
+PFS_engine_table_share_state
+table_setup_consumers::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_setup_consumers::m_share=
 {
@@ -145,7 +150,9 @@ table_setup_consumers::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE setup_consumers("
                       "NAME VARCHAR(64) not null comment 'Consumer name',"
                       "ENABLED ENUM ('YES', 'NO') not null comment 'YES or NO for whether or not the consumer is enabled. You can modify this column to ensure that event information is added, or is not added.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_setup_consumers::create(void)
@@ -194,7 +201,7 @@ int table_setup_consumers::rnd_next(void)
 int table_setup_consumers::rnd_pos(const void *pos)
 {
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < COUNT_SETUP_CONSUMERS);
+  assert(m_pos.m_index < COUNT_SETUP_CONSUMERS);
   m_row= &all_setup_consumers_data[m_pos.m_index];
   return 0;
 }
@@ -206,11 +213,11 @@ int table_setup_consumers::read_row_values(TABLE *table,
 {
   Field *f;
 
-  DBUG_ASSERT(m_row);
+  assert(m_row);
 
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 0);
+  assert(table->s->null_bytes == 0);
 
   for (; (f= *fields) ; fields++)
   {
@@ -225,7 +232,7 @@ int table_setup_consumers::read_row_values(TABLE *table,
         set_field_enum(f, (*m_row->m_enabled_ptr) ? ENUM_YES : ENUM_NO);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }
@@ -241,7 +248,7 @@ int table_setup_consumers::update_row_values(TABLE *table,
   Field *f;
   enum_yes_no value;
 
-  DBUG_ASSERT(m_row);
+  assert(m_row);
 
   for (; (f= *fields) ; fields++)
   {
@@ -258,7 +265,7 @@ int table_setup_consumers::update_row_values(TABLE *table,
         break;
       }
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

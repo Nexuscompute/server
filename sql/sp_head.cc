@@ -46,6 +46,7 @@
 #include "sql_audit.h"
 #include "debug_sync.h"
 #ifdef WITH_WSREP
+#include "wsrep.h"
 #include "wsrep_trans_observer.h"
 #endif /* WITH_WSREP */
 
@@ -407,6 +408,26 @@ Item *THD::sp_fix_func_item(Item **it_addr)
     DBUG_RETURN(NULL);
   }
   DBUG_RETURN(*it_addr);
+}
+
+
+/**
+  Prepare an Item for evaluation as an assignment source,
+  for assignment to the given target.
+
+  @param to        - the assignment target
+  @param it_addr   - a pointer on item refernce
+
+  @retval          -  NULL on error
+  @retval          -  a prepared item pointer on success
+*/
+Item *THD::sp_fix_func_item_for_assignment(const Field *to, Item **it_addr)
+{
+  DBUG_ENTER("THD::sp_fix_func_item_for_assignment");
+  Item *res= sp_fix_func_item(it_addr);
+  if (res && (!res->check_assignability_to(to, false)))
+    DBUG_RETURN(res);
+  DBUG_RETURN(NULL);
 }
 
 
@@ -829,7 +850,7 @@ void
 sp_head::set_stmt_end(THD *thd)
 {
   Lex_input_stream *lip= & thd->m_parser_state->m_lip; /* shortcut */
-  const char *end_ptr= lip->get_cpp_ptr(); /* shortcut */
+  const char *end_ptr= lip->get_cpp_tok_start(); /* shortcut */
 
   /* Make the string of parameters. */
 
@@ -1498,7 +1519,7 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
                                wsrep_current_error_status(thd));
           thd->wsrep_cs().reset_error();
           /* Reset also thd->killed if it has been set during BF abort. */
-          if (thd->killed == KILL_QUERY)
+          if (killed_mask_hard(thd->killed) == KILL_QUERY)
             thd->killed= NOT_KILLED;
           /* if failed transaction was not replayed, must return with error from here */
           if (!must_replay) err_status = 1;
@@ -1882,7 +1903,7 @@ sp_head::execute_trigger(THD *thd,
 
     my_error(ER_TABLEACCESS_DENIED_ERROR, MYF(0), priv_desc,
              thd->security_ctx->priv_user, thd->security_ctx->host_or_ip,
-             table_name->str);
+             db_name->str, table_name->str);
 
     m_security_ctx.restore_security_context(thd, save_ctx);
     DBUG_RETURN(TRUE);
@@ -2079,7 +2100,8 @@ sp_head::execute_function(THD *thd, Item **argp, uint argcount,
     /* Arguments must be fixed in Item_func_sp::fix_fields */
     DBUG_ASSERT(argp[arg_no]->fixed());
 
-    if ((err_status= (*func_ctx)->set_parameter(thd, arg_no, &(argp[arg_no]))))
+    err_status= bind_input_param(thd, argp[arg_no], arg_no, *func_ctx, TRUE);
+    if (err_status)
       goto err_with_cleanup;
   }
 
@@ -2201,6 +2223,19 @@ sp_head::execute_function(THD *thd, Item **argp, uint argcount,
     {
       my_error(ER_SP_NORETURNEND, MYF(0), m_name.str);
       err_status= TRUE;
+    }
+    else
+    {
+      /*
+        Copy back all OUT or INOUT values to the previous frame, or
+        set global user variables
+      */
+      for (arg_no= 0; arg_no < argcount; arg_no++)
+      {
+        err_status= bind_output_param(thd, argp[arg_no], arg_no, octx, *func_ctx);
+        if (err_status)
+          break;
+      }
     }
   }
 
@@ -2324,50 +2359,9 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
       if (!arg_item)
         break;
 
-      sp_variable *spvar= m_pcont->find_variable(i);
-
-      if (!spvar)
-        continue;
-
-      if (spvar->mode != sp_variable::MODE_IN)
-      {
-        Settable_routine_parameter *srp=
-          arg_item->get_settable_routine_parameter();
-
-        if (!srp)
-        {
-          my_error(ER_SP_NOT_VAR_ARG, MYF(0), i+1, ErrConvDQName(this).ptr());
-          err_status= TRUE;
-          break;
-        }
-
-        srp->set_required_privilege(spvar->mode == sp_variable::MODE_INOUT);
-      }
-
-      if (spvar->mode == sp_variable::MODE_OUT)
-      {
-        Item_null *null_item= new (thd->mem_root) Item_null(thd);
-        Item *tmp_item= null_item;
-
-        if (!null_item ||
-            nctx->set_parameter(thd, i, &tmp_item))
-        {
-          DBUG_PRINT("error", ("set variable failed"));
-          err_status= TRUE;
-          break;
-        }
-      }
-      else
-      {
-        if (nctx->set_parameter(thd, i, it_args.ref()))
-        {
-          DBUG_PRINT("error", ("set variable 2 failed"));
-          err_status= TRUE;
-          break;
-        }
-      }
-
-      TRANSACT_TRACKER(add_trx_state_from_thd(thd));
+      err_status= bind_input_param(thd, arg_item, i, nctx, FALSE);
+      if (err_status)
+        break;
     }
 
     /*
@@ -2412,7 +2406,7 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
     Disable slow log if:
     - Slow logging is enabled (no change needed)
     - This is a normal SP (not event log)
-    - If we have not explicitely disabled logging of SP
+    - If we have not explicitly disabled logging of SP
   */
   if (save_enable_slow_log &&
       ((!(m_flags & LOG_SLOW_STATEMENTS) &&
@@ -2426,7 +2420,7 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
     Disable general log if:
     - If general log is enabled (no change needed)
     - This is a normal SP (not event log)
-    - If we have not explicitely disabled logging of SP
+    - If we have not explicitly disabled logging of SP
   */
   if (!(thd->variables.option_bits & OPTION_LOG_OFF) &&
       (!(m_flags & LOG_GENERAL_LOG) &&
@@ -2477,31 +2471,9 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
       if (!arg_item)
         break;
 
-      sp_variable *spvar= m_pcont->find_variable(i);
-
-      if (spvar->mode == sp_variable::MODE_IN)
-        continue;
-
-      Settable_routine_parameter *srp=
-        arg_item->get_settable_routine_parameter();
-
-      DBUG_ASSERT(srp);
-
-      if (srp->set_value(thd, octx, nctx->get_variable_addr(i)))
-      {
-        DBUG_PRINT("error", ("set value failed"));
-        err_status= TRUE;
+      err_status= bind_output_param(thd, arg_item, i, octx, nctx);
+      if (err_status)
         break;
-      }
-
-      Send_field *out_param_info= new (thd->mem_root) Send_field(thd, nctx->get_parameter(i));
-      out_param_info->db_name= m_db;
-      out_param_info->table_name= m_name;
-      out_param_info->org_table_name= m_name;
-      out_param_info->col_name= spvar->name;
-      out_param_info->org_col_name= spvar->name;
-
-      srp->set_out_param_info(out_param_info);
     }
   }
 
@@ -2532,6 +2504,112 @@ sp_head::execute_procedure(THD *thd, List<Item> *args)
   DBUG_RETURN(err_status);
 }
 
+bool
+sp_head::bind_input_param(THD *thd,
+                          Item *arg_item,
+                          uint arg_no,
+                          sp_rcontext *nctx,
+                          bool is_function)
+{
+  DBUG_ENTER("sp_head::bind_input_param");
+
+  sp_variable *spvar= m_pcont->find_variable(arg_no);
+  if (!spvar)
+    DBUG_RETURN(FALSE);
+
+  if (spvar->mode != sp_variable::MODE_IN)
+  {
+    Settable_routine_parameter *srp=
+      arg_item->get_settable_routine_parameter();
+
+    if (!srp)
+    {
+      my_error(ER_SP_NOT_VAR_ARG, MYF(0), arg_no+1, ErrConvDQName(this).ptr());
+      DBUG_RETURN(TRUE);
+    }
+
+    if (is_function)
+    {
+      /*
+        Check if the function is called from SELECT/INSERT/UPDATE/DELETE query
+        and parameter is OUT or INOUT.
+        If yes, it is an invalid call - throw error.
+      */
+      if (thd->lex->sql_command == SQLCOM_SELECT || 
+          thd->lex->sql_command == SQLCOM_INSERT ||
+          thd->lex->sql_command == SQLCOM_INSERT_SELECT ||
+          thd->lex->sql_command == SQLCOM_UPDATE ||
+          thd->lex->sql_command == SQLCOM_DELETE)
+      {
+        my_error(ER_SF_OUT_INOUT_ARG_NOT_ALLOWED, MYF(0), arg_no+1, m_name.str);
+        DBUG_RETURN(TRUE);
+      }
+    }
+
+    srp->set_required_privilege(spvar->mode == sp_variable::MODE_INOUT);
+  }
+
+  if (spvar->mode == sp_variable::MODE_OUT)
+  {
+    Item_null *null_item= new (thd->mem_root) Item_null(thd);
+    Item *tmp_item= null_item;
+
+    if (!null_item ||
+        nctx->set_parameter(thd, arg_no, &tmp_item))
+    {
+      DBUG_PRINT("error", ("set variable failed"));
+      DBUG_RETURN(TRUE);
+    }
+  }
+  else
+  {
+    if (nctx->set_parameter(thd, arg_no, &arg_item))
+    {
+      DBUG_PRINT("error", ("set variable 2 failed"));
+      DBUG_RETURN(TRUE);
+    }
+  }
+
+  TRANSACT_TRACKER(add_trx_state_from_thd(thd));
+
+  DBUG_RETURN(FALSE);
+}
+
+bool
+sp_head::bind_output_param(THD *thd,
+                           Item *arg_item,
+                           uint arg_no,
+                           sp_rcontext *octx,
+                           sp_rcontext *nctx)
+{
+  DBUG_ENTER("sp_head::bind_output_param");
+
+  sp_variable *spvar= m_pcont->find_variable(arg_no);
+  if (spvar->mode == sp_variable::MODE_IN)
+    DBUG_RETURN(FALSE);
+
+  Settable_routine_parameter *srp=
+    arg_item->get_settable_routine_parameter();
+
+  DBUG_ASSERT(srp);
+
+  if (srp->set_value(thd, octx, nctx->get_variable_addr(arg_no)))
+  {
+    DBUG_PRINT("error", ("set value failed"));
+    DBUG_RETURN(TRUE);
+  }
+
+  Send_field *out_param_info= new (thd->mem_root) Send_field(thd, nctx->get_parameter(arg_no));
+  out_param_info->db_name= m_db;
+  out_param_info->table_name= m_name;
+  out_param_info->org_table_name= m_name;
+  out_param_info->col_name= spvar->name;
+  out_param_info->org_col_name= spvar->name;
+
+  srp->set_out_param_info(out_param_info);
+
+  DBUG_RETURN(FALSE);
+}
 
 /**
   Reset lex during parsing, before we parse a sub statement.
@@ -3551,6 +3629,7 @@ sp_lex_keeper::reset_lex_and_exec_core(THD *thd, uint *nextp,
     lex_query_tables_own_last= m_lex->query_tables_own_last;
     prelocking_tables= *lex_query_tables_own_last;
     *lex_query_tables_own_last= NULL;
+    m_lex->query_tables_last= m_lex->query_tables_own_last;
     m_lex->mark_as_requiring_prelocking(NULL);
   }
   thd->rollback_item_tree_changes();
@@ -4070,7 +4149,7 @@ sp_instr_jump_if_not::exec_core(THD *thd, uint *nextp)
   Item *it;
   int res;
 
-  it= thd->sp_prepare_func_item(&m_expr);
+  it= thd->sp_prepare_func_item(&m_expr, 1);
   if (! it)
   {
     res= -1;

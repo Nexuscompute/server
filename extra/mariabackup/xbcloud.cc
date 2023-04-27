@@ -1676,8 +1676,11 @@ container_list_add_object(container_list *list, const char *name,
 		list->object_count += object_count_step;
 	}
 	assert(list->idx <= list->object_count);
-	strcpy(list->objects[list->idx].name, name);
-	strcpy(list->objects[list->idx].hash, hash);
+	safe_strcpy(list->objects[list->idx].name,
+		    sizeof(list->objects[list->idx].name), name);
+	safe_strcpy(list->objects[list->idx].hash,
+		    sizeof(list->objects[list->idx].hash), hash);
+
 	list->objects[list->idx].bytes = bytes;
 	++list->idx;
 }
@@ -2531,7 +2534,7 @@ swift_keystone_auth_v3(const char *auth_url, swift_auth_info *info)
 	} else if (opt_swift_project != NULL) {
 		snprintf(scope, sizeof(scope),
 			",\"scope\":{\"project\":{\"name\":\"%s\"%s}}",
-			opt_swift_project_id, domain);
+			opt_swift_project, domain);
 	}
 
 	snprintf(payload, sizeof(payload), "{\"auth\":{\"identity\":"

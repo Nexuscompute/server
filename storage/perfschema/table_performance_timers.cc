@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -34,6 +34,11 @@
 
 THR_LOCK table_performance_timers::m_table_lock;
 
+PFS_engine_table_share_state
+table_performance_timers::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_performance_timers::m_share=
 {
@@ -50,7 +55,9 @@ table_performance_timers::m_share=
                       "TIMER_FREQUENCY BIGINT comment 'Number of timer units per second. Dependent on the processor speed.',"
                       "TIMER_RESOLUTION BIGINT comment 'Number of timer units by which timed values increase each time.',"
                       "TIMER_OVERHEAD BIGINT comment 'Minimum timer overhead, determined during initialization by calling the timer 20 times and selecting the smallest value. Total overhead will be at least double this, as the timer is called at the beginning and end of each timed event.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_performance_timers::create(void)
@@ -121,7 +128,7 @@ int table_performance_timers::rnd_next(void)
 int table_performance_timers::rnd_pos(const void *pos)
 {
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index < COUNT_TIMER_NAME);
+  assert(m_pos.m_index < COUNT_TIMER_NAME);
   m_row= &m_data[m_pos.m_index];
   return 0;
 }
@@ -133,10 +140,10 @@ int table_performance_timers::read_row_values(TABLE *table,
 {
   Field *f;
 
-  DBUG_ASSERT(m_row);
+  assert(m_row);
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -167,7 +174,7 @@ int table_performance_timers::read_row_values(TABLE *table,
           f->set_null();
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

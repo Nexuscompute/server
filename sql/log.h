@@ -18,7 +18,6 @@
 #define LOG_H
 
 #include "handler.h"                            /* my_xid */
-#include "wsrep_mysqld.h"
 #include "rpl_constants.h"
 
 class Relay_log_info;
@@ -43,8 +42,8 @@ class TC_LOG
 {
   public:
   int using_heuristic_recover();
-  TC_LOG() {}
-  virtual ~TC_LOG() {}
+  TC_LOG() = default;
+  virtual ~TC_LOG() = default;
 
   virtual int open(const char *opt_name)=0;
   virtual void close()=0;
@@ -101,7 +100,7 @@ extern PSI_cond_key key_COND_prepare_ordered;
 class TC_LOG_DUMMY: public TC_LOG // use it to disable the logging
 {
 public:
-  TC_LOG_DUMMY() {}
+  TC_LOG_DUMMY() = default;
   int open(const char *opt_name)        { return 0; }
   void close()                          { }
   /*
@@ -309,7 +308,7 @@ class MYSQL_LOG
 {
 public:
   MYSQL_LOG();
-  virtual ~MYSQL_LOG() {}
+  virtual ~MYSQL_LOG() = default;
   void init_pthread_objects();
   void cleanup();
   bool open(
@@ -736,7 +735,7 @@ public:
   }
   void harvest_bytes_written(Atomic_counter<uint64> *counter)
   {
-#ifndef DBUG_OFF
+#ifdef DBUG_TRACE
     char buf1[22],buf2[22];
 #endif
     DBUG_ENTER("harvest_bytes_written");
@@ -920,7 +919,7 @@ public:
   bool lookup_domain_in_binlog_state(uint32 domain_id, rpl_gtid *out_gtid);
   int bump_seq_no_counter_if_needed(uint32 domain_id, uint64 seq_no);
   bool check_strict_gtid_sequence(uint32 domain_id, uint32 server_id,
-                                  uint64 seq_no);
+                                  uint64 seq_no, bool no_error= false);
 
   /**
    * used when opening new file, and binlog_end_pos moves backwards
@@ -984,7 +983,7 @@ public:
 class Log_event_handler
 {
 public:
-  Log_event_handler() {}
+  Log_event_handler() = default;
   virtual bool init()= 0;
   virtual void cleanup()= 0;
 
@@ -998,7 +997,7 @@ public:
                            const char *command_type, size_t command_type_len,
                            const char *sql_text, size_t sql_text_len,
                            CHARSET_INFO *client_cs)= 0;
-  virtual ~Log_event_handler() {}
+  virtual ~Log_event_handler() = default;
 };
 
 
@@ -1115,8 +1114,7 @@ public:
                          const char *query, size_t query_length);
 
   /* we use this function to setup all enabled log event handlers */
-  int set_handlers(ulonglong error_log_printer,
-                   ulonglong slow_log_printer,
+  int set_handlers(ulonglong slow_log_printer,
                    ulonglong general_log_printer);
   void init_error_log(ulonglong error_log_printer);
   void init_slow_log(ulonglong slow_log_printer);
@@ -1254,7 +1252,7 @@ static inline TC_LOG *get_tc_log_implementation()
 }
 
 #ifdef WITH_WSREP
-IO_CACHE* wsrep_get_trans_cache(THD *);
+IO_CACHE* wsrep_get_cache(THD *, bool);
 void wsrep_thd_binlog_trx_reset(THD * thd);
 void wsrep_thd_binlog_stmt_rollback(THD * thd);
 #endif /* WITH_WSREP */
@@ -1266,5 +1264,8 @@ get_gtid_list_event(IO_CACHE *cache, Gtid_list_log_event **out_gtid_list);
 int binlog_commit(THD *thd, bool all, bool is_ro_1pc= false);
 int binlog_commit_by_xid(handlerton *hton, XID *xid);
 int binlog_rollback_by_xid(handlerton *hton, XID *xid);
+bool write_bin_log_start_alter(THD *thd, bool& partial_alter,
+                               uint64 start_alter_id, bool log_if_exists);
+
 
 #endif /* LOG_H */

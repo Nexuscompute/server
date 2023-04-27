@@ -1,4 +1,4 @@
-/* Copyright 2018-2021 Codership Oy <info@codership.com>
+/* Copyright 2018-2023 Codership Oy <info@codership.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 #include "wsrep_schema.h"
 #include "wsrep_xid.h"
 #include "wsrep_trans_observer.h"
+#include "wsrep_server_state.h"
 
 #include "sql_class.h" /* THD */
 #include "transaction.h"
@@ -291,6 +292,7 @@ int Wsrep_high_priority_service::append_fragment_and_commit(
 
   ret= ret || trans_commit(m_thd);
   ret= ret || (m_thd->wsrep_cs().after_applying(), 0);
+
   m_thd->release_transactional_locks();
 
   free_root(m_thd->mem_root, MYF(MY_KEEP_PREALLOC));
@@ -379,8 +381,16 @@ int Wsrep_high_priority_service::rollback(const wsrep::ws_handle& ws_handle,
      assert(ws_handle == wsrep::ws_handle());
   }
   int ret= (trans_rollback_stmt(m_thd) || trans_rollback(m_thd));
+
+  WSREP_DEBUG("::rollback() thread: %lu, client_state %s "
+              "client_mode %s trans_state %s killed %d",
+              thd_get_thread_id(m_thd),
+              wsrep_thd_client_state_str(m_thd),
+              wsrep_thd_client_mode_str(m_thd),
+              wsrep_thd_transaction_state_str(m_thd),
+              m_thd->killed);
+
   m_thd->release_transactional_locks();
-  m_thd->mdl_context.release_explicit_locks();
 
   free_root(m_thd->mem_root, MYF(MY_KEEP_PREALLOC));
 
@@ -403,6 +413,7 @@ int Wsrep_high_priority_service::apply_toi(const wsrep::ws_meta& ws_meta,
   WSREP_DEBUG("Wsrep_high_priority_service::apply_toi: %lld",
               client_state.toi_meta().seqno().get());
 
+#ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("sync.wsrep_apply_toi",
                   {
                     const char act[]=
@@ -412,6 +423,7 @@ int Wsrep_high_priority_service::apply_toi(const wsrep::ws_meta& ws_meta,
                     DBUG_ASSERT(!debug_sync_set_action(thd,
                                                        STRING_WITH_LEN(act)));
                   };);
+#endif
 
   int ret= apply_events(thd, m_rli, data, err);
   wsrep_thd_set_ignored_error(thd, false);
@@ -457,6 +469,7 @@ int Wsrep_high_priority_service::log_dummy_write_set(const wsrep::ws_handle& ws_
   DBUG_PRINT("info",
              ("Wsrep_high_priority_service::log_dummy_write_set: seqno=%lld",
               ws_meta.seqno().get()));
+#ifdef ENABLED_DEBUG_SYNC
   DBUG_EXECUTE_IF("sync.wsrep_log_dummy_write_set",
                   {
                     const char act[]=
@@ -465,6 +478,7 @@ int Wsrep_high_priority_service::log_dummy_write_set(const wsrep::ws_handle& ws_
                     DBUG_ASSERT(!debug_sync_set_action(m_thd,
                                                        STRING_WITH_LEN(act)));
                   };);
+#endif
 
   if (ws_meta.ordered())
   {
@@ -486,7 +500,13 @@ int Wsrep_high_priority_service::log_dummy_write_set(const wsrep::ws_handle& ws_
     if (!WSREP_EMULATE_BINLOG(m_thd))
     {
       wsrep_register_for_group_commit(m_thd);
-      ret = ret || cs.provider().commit_order_leave(ws_handle, ws_meta, err);
+      /* wait_for_prior_commit() ensures that all preceding transactions
+         have been committed and seqno has been synced into
+         storage engine. We don't release commit order here yet to
+         avoid following transactions to sync seqno before
+         wsrep_set_SE_checkpoint() below returns. This effectively pauses
+         group commit for the checkpoint operation, but is the only way to
+         ensure proper ordering. */
       m_thd->wait_for_prior_commit();
     }
 
@@ -496,10 +516,7 @@ int Wsrep_high_priority_service::log_dummy_write_set(const wsrep::ws_handle& ws_
     {
       wsrep_unregister_from_group_commit(m_thd);
     }
-    else
-    {
-      ret= ret || cs.provider().commit_order_leave(ws_handle, ws_meta, err);
-    }
+    ret= ret || cs.provider().commit_order_leave(ws_handle, ws_meta, err);
     cs.after_applying();
   }
   DBUG_RETURN(ret);
@@ -560,8 +577,8 @@ int Wsrep_applier_service::apply_write_set(const wsrep::ws_meta& ws_meta,
   /* moved dbug sync point here, after possible THD switch for SR transactions
      has ben done
   */
-  /* Allow tests to block the applier thread using the DBUG facilities */
 #ifdef ENABLED_DEBUG_SYNC
+  /* Allow tests to block the applier thread using the DBUG facilities */
   DBUG_EXECUTE_IF("sync.wsrep_apply_cb",
                  {
                    const char act[]=
@@ -633,6 +650,9 @@ Wsrep_replayer_service::Wsrep_replayer_service(THD* replayer_thd, THD* orig_thd)
      transactional locks */
   DBUG_ASSERT(!orig_thd->mdl_context.has_transactional_locks());
 
+  replayer_thd->system_thread_info.rpl_sql_info=
+    new rpl_sql_thread_info(replayer_thd->wsrep_rgi->rli->mi->rpl_filter);
+
   /* Make a shadow copy of diagnostics area and reset */
   m_da_shadow.status= orig_thd->get_stmt_da()->status();
   if (m_da_shadow.status == Diagnostics_area::DA_OK)
@@ -671,35 +691,35 @@ Wsrep_replayer_service::Wsrep_replayer_service(THD* replayer_thd, THD* orig_thd)
 
 Wsrep_replayer_service::~Wsrep_replayer_service()
 {
-  THD* replayer_thd= m_thd;
-  THD* orig_thd= m_orig_thd;
-
   /* Switch execution context back to original. */
-  wsrep_after_apply(replayer_thd);
-  wsrep_after_command_ignore_result(replayer_thd);
-  wsrep_close(replayer_thd);
-  wsrep_reset_threadvars(replayer_thd);
-  wsrep_store_threadvars(orig_thd);
+  wsrep_after_apply(m_thd);
+  wsrep_after_command_ignore_result(m_thd);
+  wsrep_close(m_thd);
+  wsrep_reset_threadvars(m_thd);
+  wsrep_store_threadvars(m_orig_thd);
 
-  DBUG_ASSERT(!orig_thd->get_stmt_da()->is_sent());
-  DBUG_ASSERT(!orig_thd->get_stmt_da()->is_set());
+  DBUG_ASSERT(!m_orig_thd->get_stmt_da()->is_sent());
+  DBUG_ASSERT(!m_orig_thd->get_stmt_da()->is_set());
+
+  delete m_thd->system_thread_info.rpl_sql_info;
+  m_thd->system_thread_info.rpl_sql_info= nullptr;
 
   if (m_replay_status == wsrep::provider::success)
   {
-    DBUG_ASSERT(replayer_thd->wsrep_cs().current_error() == wsrep::e_success);
-    orig_thd->reset_kill_query();
-    my_ok(orig_thd, m_da_shadow.affected_rows, m_da_shadow.last_insert_id);
+    DBUG_ASSERT(m_thd->wsrep_cs().current_error() == wsrep::e_success);
+    m_orig_thd->reset_kill_query();
+    my_ok(m_orig_thd, m_da_shadow.affected_rows, m_da_shadow.last_insert_id);
   }
   else if (m_replay_status == wsrep::provider::error_certification_failed)
   {
-    wsrep_override_error(orig_thd, ER_LOCK_DEADLOCK);
+    wsrep_override_error(m_orig_thd, ER_LOCK_DEADLOCK);
   }
   else
   {
     DBUG_ASSERT(0);
     WSREP_ERROR("trx_replay failed for: %d, schema: %s, query: %s",
                 m_replay_status,
-                orig_thd->db.str, wsrep_thd_query(orig_thd));
+                m_orig_thd->db.str, wsrep_thd_query(m_orig_thd));
     unireg_abort(1);
   }
 }
@@ -714,6 +734,7 @@ int Wsrep_replayer_service::apply_write_set(const wsrep::ws_meta& ws_meta,
   DBUG_ASSERT(thd->wsrep_trx().active());
   DBUG_ASSERT(thd->wsrep_trx().state() == wsrep::transaction::s_replaying);
 
+#ifdef ENABLED_DEBUG_SYNC
   /* Allow tests to block the replayer thread using the DBUG facilities */
   DBUG_EXECUTE_IF("sync.wsrep_replay_cb",
                  {
@@ -724,6 +745,7 @@ int Wsrep_replayer_service::apply_write_set(const wsrep::ws_meta& ws_meta,
                    DBUG_ASSERT(!debug_sync_set_action(thd,
                                                       STRING_WITH_LEN(act)));
                  };);
+#endif
 
   wsrep_setup_uk_and_fk_checks(thd);
 

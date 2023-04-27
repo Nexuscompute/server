@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -125,8 +125,7 @@ public:
   void get_normalizer(PFS_instr_class *instr_class);
 
   /** Destructor. */
-  virtual ~PFS_engine_table()
-  {}
+  virtual ~PFS_engine_table() = default;
 
   /**
     Helper, assign a value to a long field.
@@ -286,6 +285,11 @@ typedef int (*pfs_delete_all_rows_t)(void);
 /** Callback to get a row count. */
 typedef ha_rows (*pfs_get_row_count_t)(void);
 
+struct PFS_engine_table_share_state {
+  /** Schema integrity flag. */
+  bool m_checked;
+};
+
 /**
   A PERFORMANCE_SCHEMA table share.
   This data is shared by all the table handles opened on the same table.
@@ -319,6 +323,10 @@ struct PFS_engine_table_share
   LEX_STRING sql;
   /** Table is available even if the Performance Schema is disabled. */
   bool m_perpetual;
+  /** Table is optional. */
+  bool m_optional;
+  /** Dynamic state. */
+  PFS_engine_table_share_state *m_state;
 };
 
 /**
@@ -328,11 +336,9 @@ struct PFS_engine_table_share
 class PFS_readonly_acl : public ACL_internal_table_access
 {
 public:
-  PFS_readonly_acl()
-  {}
+  PFS_readonly_acl() = default;
 
-  ~PFS_readonly_acl()
-  {}
+  ~PFS_readonly_acl() = default;
 
   virtual ACL_internal_access_result check(privilege_t want_access,
                                            privilege_t *save_priv) const;
@@ -348,13 +354,11 @@ extern PFS_readonly_acl pfs_readonly_acl;
 class PFS_truncatable_acl : public ACL_internal_table_access
 {
 public:
-  PFS_truncatable_acl()
-  {}
+  PFS_truncatable_acl() = default;
 
-  ~PFS_truncatable_acl()
-  {}
+  ~PFS_truncatable_acl() = default;
 
-  ACL_internal_access_result check(privilege_t want_access,
+  virtual ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;
 };
 
@@ -368,11 +372,9 @@ extern PFS_truncatable_acl pfs_truncatable_acl;
 class PFS_updatable_acl : public ACL_internal_table_access
 {
 public:
-  PFS_updatable_acl()
-  {}
+  PFS_updatable_acl() = default;
 
-  ~PFS_updatable_acl()
-  {}
+  ~PFS_updatable_acl() = default;
 
   ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;
@@ -388,11 +390,9 @@ extern PFS_updatable_acl pfs_updatable_acl;
 class PFS_editable_acl : public ACL_internal_table_access
 {
 public:
-  PFS_editable_acl()
-  {}
+  PFS_editable_acl() = default;
 
-  ~PFS_editable_acl()
-  {}
+  ~PFS_editable_acl() = default;
 
   ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;
@@ -407,11 +407,9 @@ extern PFS_editable_acl pfs_editable_acl;
 class PFS_unknown_acl : public ACL_internal_table_access
 {
 public:
-  PFS_unknown_acl()
-  {}
+  PFS_unknown_acl() = default;
 
-  ~PFS_unknown_acl()
-  {}
+  ~PFS_unknown_acl() = default;
 
   ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;
@@ -457,6 +455,25 @@ public:
 
 /** Singleton instance of PFS_readonly_world_acl */
 extern PFS_truncatable_world_acl pfs_truncatable_world_acl;
+
+
+/**
+  Privileges for readable processlist tables.
+*/
+class PFS_readonly_processlist_acl : public PFS_readonly_acl {
+ public:
+  PFS_readonly_processlist_acl()
+  {}
+
+  ~PFS_readonly_processlist_acl()
+  {}
+
+  virtual ACL_internal_access_result check(privilege_t want_access,
+                                           privilege_t *save_priv) const;
+};
+
+/** Singleton instance of PFS_readonly_processlist_acl */
+extern PFS_readonly_processlist_acl pfs_readonly_processlist_acl;
 
 
 /** Position of a cursor, for simple iterations. */

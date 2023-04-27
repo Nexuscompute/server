@@ -85,13 +85,15 @@ DROP TABLE maria050533_xxx_croatian_ci;
 --copy_file std_data/ctype_upgrade/maria050533_xxx_croatian_ci.MYI $MYSQLD_DATADIR/test/maria050533_xxx_croatian_ci.MYI
 ALTER TABLE maria050533_xxx_croatian_ci FORCE;
 SHOW CREATE TABLE maria050533_xxx_croatian_ci;
+# enable after fix MDEV-28571
+--disable_view_protocol
 SELECT GROUP_CONCAT(a ORDER BY BINARY a) FROM maria050533_xxx_croatian_ci GROUP BY a;
 SELECT GROUP_CONCAT(b ORDER BY BINARY b) FROM maria050533_xxx_croatian_ci GROUP BY b;
 SELECT GROUP_CONCAT(c ORDER BY BINARY c) FROM maria050533_xxx_croatian_ci GROUP BY c;
 SELECT GROUP_CONCAT(d ORDER BY BINARY d) FROM maria050533_xxx_croatian_ci GROUP BY d;
 SELECT GROUP_CONCAT(e ORDER BY BINARY e) FROM maria050533_xxx_croatian_ci GROUP BY e;
 DROP TABLE maria050533_xxx_croatian_ci;
-
+--enable_view_protocol
 
 --echo #
 --echo # Upgrade from Maria-10.0.4
@@ -116,13 +118,15 @@ DROP TABLE maria100004_xxx_croatian_ci;
 --copy_file std_data/ctype_upgrade/maria100004_xxx_croatian_ci.MYI $MYSQLD_DATADIR/test/maria100004_xxx_croatian_ci.MYI
 ALTER TABLE maria100004_xxx_croatian_ci FORCE;
 SHOW CREATE TABLE maria100004_xxx_croatian_ci;
+# enable after fix MDEV-28571
+--disable_view_protocol
 SELECT GROUP_CONCAT(a ORDER BY BINARY a) FROM maria100004_xxx_croatian_ci GROUP BY a;
 SELECT GROUP_CONCAT(b ORDER BY BINARY b) FROM maria100004_xxx_croatian_ci GROUP BY b;
 SELECT GROUP_CONCAT(c ORDER BY BINARY c) FROM maria100004_xxx_croatian_ci GROUP BY c;
 SELECT GROUP_CONCAT(d ORDER BY BINARY d) FROM maria100004_xxx_croatian_ci GROUP BY d;
 SELECT GROUP_CONCAT(e ORDER BY BINARY e) FROM maria100004_xxx_croatian_ci GROUP BY e;
 DROP TABLE maria100004_xxx_croatian_ci;
-
+--enable_view_protocol
 
 
 --echo #
@@ -137,13 +141,15 @@ DROP TABLE maria100004_xxx_croatian_ci;
 --copy_file std_data/ctype_upgrade/mysql050614_xxx_croatian_ci.MYI $MYSQLD_DATADIR/test/mysql050614_xxx_croatian_ci.MYI
 CHECK TABLE mysql050614_xxx_croatian_ci FOR UPGRADE;
 SHOW CREATE TABLE mysql050614_xxx_croatian_ci;
+# enable after fix MDEV-28571
+--disable_view_protocol
 SELECT GROUP_CONCAT(a ORDER BY BINARY a) FROM mysql050614_xxx_croatian_ci GROUP BY a;
 SELECT GROUP_CONCAT(b ORDER BY BINARY b) FROM mysql050614_xxx_croatian_ci GROUP BY b;
 SELECT GROUP_CONCAT(c ORDER BY BINARY c) FROM mysql050614_xxx_croatian_ci GROUP BY c;
 SELECT GROUP_CONCAT(d ORDER BY BINARY d) FROM mysql050614_xxx_croatian_ci GROUP BY d;
 SELECT GROUP_CONCAT(e ORDER BY BINARY e) FROM mysql050614_xxx_croatian_ci GROUP BY e;
 DROP TABLE mysql050614_xxx_croatian_ci;
-
+--enable_view_protocol
 
 --echo #
 --echo # Checking mysql_upgrade
@@ -197,3 +203,38 @@ DROP TABLE maria050313_utf8_croatian_ci;
 DROP TABLE maria050533_xxx_croatian_ci;
 DROP TABLE maria100004_xxx_croatian_ci;
 DROP TABLE mysql050614_xxx_croatian_ci;
+
+
+--echo #
+--echo # Start of 10.4 tests
+--echo #
+
+--echo #
+--echo # MDEV-30746 Regression in ucs2_general_mysql500_ci
+--echo #
+
+SET NAMES utf8mb3;
+
+copy_file std_data/ctype_upgrade/mariadb100428_ucs2_general_ci.frm $MYSQLD_DATADIR/test/t1.frm;
+copy_file std_data/ctype_upgrade/mariadb100428_ucs2_general_ci.MYD $MYSQLD_DATADIR/test/t1.MYD;
+copy_file std_data/ctype_upgrade/mariadb100428_ucs2_general_ci.MYI $MYSQLD_DATADIR/test/t1.MYI;
+
+--error ER_TABLE_NEEDS_REBUILD
+SHOW CREATE TABLE t1;
+--error ER_TABLE_NEEDS_REBUILD
+SELECT * FROM t1;
+--error ER_TABLE_NEEDS_REBUILD
+SELECT * FROM t1 IGNORE KEY(a);
+CHECK TABLE t1;
+REPAIR TABLE t1;
+SELECT a, HEX(a), HEX(WEIGHT_STRING(a)) FROM t1 ORDER BY a;
+SELECT a, HEX(a), HEX(WEIGHT_STRING(a)) FROM t1 FORCE KEY(a) ORDER BY a;
+SELECT a, HEX(a), HEX(WEIGHT_STRING(a)) FROM t1 IGNORE KEY(a) ORDER BY a;
+SELECT GROUP_CONCAT(a) FROM t1 GROUP BY a ORDER BY a;
+SELECT GROUP_CONCAT(a) FROM t1 IGNORE KEY(a) GROUP BY a ORDER BY a;
+SELECT GROUP_CONCAT(a) FROM t1 FORCE KEY(a) GROUP BY a ORDER BY a;
+DROP TABLE t1;
+
+--echo #
+--echo # End of 10.4 tests
+--echo #

@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2011, 2021, MariaDB
+   Copyright (c) 2011, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -370,7 +370,8 @@ int mysql_update(THD *thd,
                  ha_rows *found_return, ha_rows *updated_return)
 {
   bool		using_limit= limit != HA_POS_ERROR;
-  bool          safe_update= thd->variables.option_bits & OPTION_SAFE_UPDATES;
+  bool          safe_update= (thd->variables.option_bits & OPTION_SAFE_UPDATES)
+                             && !thd->lex->describe;
   bool          used_key_is_modified= FALSE, transactional_table;
   bool          will_batch= FALSE;
   bool		can_compare_record;
@@ -426,7 +427,7 @@ int mysql_update(THD *thd,
     DBUG_ASSERT(update_source_table || table_list->view != 0);
     DBUG_PRINT("info", ("Switch to multi-update"));
     /* pass counter value */
-    thd->lex->table_count= table_count;
+    thd->lex->table_count_update= table_count;
     if (thd->lex->period_conditions.is_set())
     {
       my_error(ER_NOT_SUPPORTED_YET, MYF(0),
@@ -522,6 +523,10 @@ int mysql_update(THD *thd,
     DBUG_RETURN(1);				/* purecov: inspected */
   }
 
+  if (table_list->table->check_assignability_explicit_fields(fields, values,
+                                                             ignore))
+    DBUG_RETURN(true);
+
   if (check_unique_table(thd, table_list))
     DBUG_RETURN(TRUE);
 
@@ -597,7 +602,7 @@ int mysql_update(THD *thd,
   }
 
   /* If running in safe sql mode, don't allow updates without keys */
-  if (table->opt_range_keys.is_clear_all())
+  if (!select || !select->quick)
   {
     thd->set_status_no_index_used();
     if (safe_update && !using_limit)
@@ -1379,7 +1384,8 @@ produce_explain_and_leave:
     goto err;
 
 emit_explain_and_leave:
-  int err2= thd->lex->explain->send_explain(thd);
+  bool extended= thd->lex->describe & DESCRIBE_EXTENDED;
+  int err2= thd->lex->explain->send_explain(thd, extended);
 
   delete select;
   free_underlaid_joins(thd, select_lex);
@@ -1453,6 +1459,8 @@ bool mysql_prepare_update(THD *thd, TABLE_LIST *table_list,
 
 
   select_lex->fix_prepare_information(thd, conds, &fake_conds);
+  if (!thd->lex->upd_del_where)
+    thd->lex->upd_del_where= *conds;
   DBUG_RETURN(FALSE);
 }
 
@@ -1857,7 +1865,7 @@ int mysql_multi_update_prepare(THD *thd)
   TABLE_LIST *table_list= lex->query_tables;
   TABLE_LIST *tl;
   Multiupdate_prelocking_strategy prelocking_strategy;
-  uint table_count= lex->table_count;
+  uint table_count= lex->table_count_update;
   DBUG_ENTER("mysql_multi_update_prepare");
 
   /*
@@ -1980,7 +1988,10 @@ bool mysql_multi_update(THD *thd, TABLE_LIST *table_list, List<Item> *fields,
   else
   {
     if (thd->lex->describe || thd->lex->analyze_stmt)
-      res= thd->lex->explain->send_explain(thd);
+    {
+      bool extended= thd->lex->describe & DESCRIBE_EXTENDED;
+      res= thd->lex->explain->send_explain(thd, extended);
+    }
   }
   thd->abort_on_warning= 0;
   DBUG_RETURN(res);
@@ -2081,7 +2092,9 @@ int multi_update::prepare(List<Item> &not_used_values,
   */
 
   int error= setup_fields(thd, Ref_ptr_array(),
-                          *values, MARK_COLUMNS_READ, 0, NULL, 0);
+                          *values, MARK_COLUMNS_READ, 0, NULL, 0) ||
+             TABLE::check_assignability_explicit_fields(*fields, *values,
+                                                        ignore);
 
   ti.rewind();
   while ((table_ref= ti++))
@@ -2122,10 +2135,9 @@ int multi_update::prepare(List<Item> &not_used_values,
       if (!tl)
 	DBUG_RETURN(1);
       update.link_in_list(tl, &tl->next_local);
-      tl->shared= table_count++;
+      table_ref->shared= tl->shared= table_count++;
       table->no_keyread=1;
       table->covering_keys.clear_all();
-      table->pos_in_table_list= tl;
       table->prepare_triggers_for_update_stmt_or_event();
       table->reset_default_fields();
     }
@@ -2295,6 +2307,11 @@ multi_update::initialize_tables(JOIN *join)
   if (unlikely((thd->variables.option_bits & OPTION_SAFE_UPDATES) &&
                error_if_full_join(join)))
     DBUG_RETURN(1);
+  if (join->implicit_grouping)
+  {
+    my_error(ER_INVALID_GROUP_FUNC_USE, MYF(0));
+    DBUG_RETURN(1);
+  }
   main_table=join->join_tab->table;
   table_to_update= 0;
 

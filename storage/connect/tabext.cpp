@@ -65,7 +65,7 @@ int CONDFIL::Init(PGLOBAL g, PHC hc)
 
 	while (alt) {
 		if (!(p = strchr(alt, '='))) {
-			strcpy(g->Message, "Invalid alias list");
+      safe_strcpy(g->Message, sizeof(g->Message), "Invalid alias list");
 			rc = RC_FX;
 			break;
 		}	// endif !p
@@ -126,7 +126,7 @@ EXTDEF::EXTDEF(void)
 bool EXTDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
 {
 	if (g->Createas) {
-		strcpy(g->Message,
+		safe_strcpy(g->Message, sizeof(g->Message),
 			"Multiple-table UPDATE/DELETE commands are not supported");
 		return true;
 	}	// endif multi
@@ -142,8 +142,14 @@ bool EXTDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
 	Username = GetStringCatInfo(g, "User", NULL);
 	Password = GetStringCatInfo(g, "Password", NULL);
 
-	if ((Srcdef = GetStringCatInfo(g, "Srcdef", NULL)))
+	// Memory was Boolean, it is now integer
+	if (!(Memory = GetIntCatInfo("Memory", 0)))
+		Memory = GetBoolCatInfo("Memory", false) ? 1 : 0;
+
+	if ((Srcdef = GetStringCatInfo(g, "Srcdef", NULL))) {
 		Read_Only = true;
+		if (Memory == 2) Memory = 1;
+	}	// endif Srcdef
 
 	Qrystr = GetStringCatInfo(g, "Query_String", "?");
 	Sep = GetStringCatInfo(g, "Separator", NULL);
@@ -153,6 +159,9 @@ bool EXTDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
 	Maxerr = GetIntCatInfo("Maxerr", 0);
 	Maxres = GetIntCatInfo("Maxres", 0);
 	Quoted = GetIntCatInfo("Quoted", 0);
+	Qchar = GetStringCatInfo(g,"Qchar", NULL);
+  if (Qchar && !Quoted)
+    Quoted = 1;
 	Options = 0;
 	Cto = 0;
 	Qto = 0;
@@ -165,10 +174,6 @@ bool EXTDEF::DefineAM(PGLOBAL g, LPCSTR am, int poff)
 
 	if (Catfunc == FNC_TABLE)
 		Tabtyp = GetStringCatInfo(g, "Tabtype", NULL);
-
-	// Memory was Boolean, it is now integer
-	if (!(Memory = GetIntCatInfo("Memory", 0)))
-		Memory = GetBoolCatInfo("Memory", false) ? 1 : 0;
 
 	Pseudo = 2;    // FILID is Ok but not ROWID
 	return false;
@@ -196,6 +201,7 @@ TDBEXT::TDBEXT(EXTDEF *tdp) : TDB(tdp)
 		Cto = tdp->Cto;
 		Qto = tdp->Qto;
 		Quoted = MY_MAX(0, tdp->GetQuoted());
+		Quote = tdp->GetQchar();
 		Rows = tdp->GetElemt();
 		Memory = tdp->Memory;
 		Scrollable = tdp->Scrollable;
@@ -212,12 +218,12 @@ TDBEXT::TDBEXT(EXTDEF *tdp) : TDB(tdp)
 		Cto = 0;
 		Qto = 0;
 		Quoted = 0;
+		Quote = NULL;
 		Rows = 0;
 		Memory = 0;
 		Scrollable = false;
 	} // endif tdp
 
-	Quote = NULL;
 	Query = NULL;
 	Count = NULL;
 	//Where = NULL;
@@ -250,6 +256,7 @@ TDBEXT::TDBEXT(PTDBEXT tdbp) : TDB(tdbp)
 	Cto = tdbp->Cto;
 	Qto = tdbp->Qto;
 	Quoted = tdbp->Quoted;
+	Quote = tdbp->Quote;
 	Rows = tdbp->Rows;
 	Memory = tdbp->Memory;
 	Scrollable = tdbp->Scrollable;
@@ -284,6 +291,37 @@ int TDBEXT::Decode(PCSZ txt, char *buf, size_t n)
 	return 0;
 } // end of Decode
 
+/*
+  Count number of %s placeholders in string.
+  Returns -1 if other sprintf placeholders are found, .g %d
+*/
+static int count_placeholders(const char *fmt)
+{
+  int cnt= 0;
+  for (const char *p=fmt; *p; p++)
+  {
+    if (*p == '%')
+    {
+      switch (p[1])
+      {
+      case 's':
+        /* %s found */
+        cnt++;
+        p++;
+        break;
+      case '%':
+        /* masking char for % found */
+        p++;
+        break;
+      default:
+        /* some other placeholder found */
+        return -1;
+      }
+    }
+  }
+  return cnt;
+}
+
 /***********************************************************************/
 /*  MakeSrcdef: make the SQL statement from SRDEF option.              */
 /***********************************************************************/
@@ -308,20 +346,33 @@ bool TDBEXT::MakeSrcdef(PGLOBAL g)
 				? To_CondFil->Having : PlugDup(g, "1=1");
 		} // endif ph
 
-		if (!stricmp(ph, "W")) {
+		int n_placeholders = count_placeholders(Srcdef);
+		if (n_placeholders < 0)
+		{
+			safe_strcpy(g->Message, sizeof(g->Message), "MakeSQL: Wrong place holders specification");
+			return true;
+		}
+
+		if (!stricmp(ph, "W") && n_placeholders <= 1) {
 			Query = new(g)STRING(g, strlen(Srcdef) + strlen(fil1));
 			Query->SetLength(sprintf(Query->GetStr(), Srcdef, fil1));
-		} else if (!stricmp(ph, "WH")) {
+		}
+		else if (!stricmp(ph, "WH") && n_placeholders <= 2)
+		{
 			Query = new(g)STRING(g, strlen(Srcdef) + strlen(fil1) + strlen(fil2));
 			Query->SetLength(sprintf(Query->GetStr(), Srcdef, fil1, fil2));
-		} else if (!stricmp(ph, "H")) {
+		}
+		else if (!stricmp(ph, "H") && n_placeholders <= 1)
+		{
 			Query = new(g)STRING(g, strlen(Srcdef) + strlen(fil2));
 			Query->SetLength(sprintf(Query->GetStr(), Srcdef, fil2));
-		} else if (!stricmp(ph, "HW")) {
+		}
+		else if (!stricmp(ph, "HW") && n_placeholders <= 2)
+		{
 			Query = new(g)STRING(g, strlen(Srcdef) + strlen(fil1) + strlen(fil2));
 			Query->SetLength(sprintf(Query->GetStr(), Srcdef, fil2, fil1));
 		} else {
-			strcpy(g->Message, "MakeSQL: Wrong place holders specification");
+			safe_strcpy(g->Message, sizeof(g->Message), "MakeSQL: Wrong place holders specification");
 			return true;
 		} // endif's ph
 
@@ -343,6 +394,8 @@ bool TDBEXT::MakeSQL(PGLOBAL g, bool cnt)
 	int    len;
 	bool   first = true;
 	PCOL   colp;
+	char *res= NULL, *my_schema_table= NULL;
+	size_t my_len= 0;
 
 	if (Srcdef)
 		return MakeSrcdef(g);
@@ -412,10 +465,37 @@ bool TDBEXT::MakeSQL(PGLOBAL g, bool cnt)
 	Decode(TableName, buf, sizeof(buf));
 
 	if (Quote) {
-		// Put table name between identifier quotes in case in contains blanks
-		Query->Append(Quote);
-		Query->Append(buf);
-		Query->Append(Quote);
+		// Tabname can have both database and table identifiers, we need to parse
+		if ((res= strstr(buf, ".")))
+		{
+			// Parse schema
+			my_len= res - buf + 1;
+			my_schema_table= (char *) malloc(my_len);
+			memcpy(my_schema_table, buf, my_len - 1);
+			my_schema_table[my_len - 1] = 0;
+			Query->Append(Quote);
+			Query->Append(my_schema_table);
+			Query->Append(Quote);
+			free(my_schema_table);
+			Query->Append(".");
+			// Parse table
+			my_len= strlen(buf) - my_len + 1;
+			my_schema_table= (char *) malloc(my_len + 1);
+			memcpy(my_schema_table, ++res, my_len);
+			my_schema_table[my_len] = 0;
+			Query->Append(Quote);
+			Query->Append(my_schema_table);
+			Query->Append(Quote);
+			free(my_schema_table);
+		}
+		else
+		{
+			// Put table name between identifier quotes in case in contains blanks
+			Query->Append(Quote);
+			Query->Append(buf);
+			Query->Append(Quote);
+		}
+
 	} else
 		Query->Append(buf);
 
@@ -433,7 +513,7 @@ bool TDBEXT::MakeSQL(PGLOBAL g, bool cnt)
 		len += ((Mode == MODE_READX) ? 256 : 1);
 
 	if (Query->IsTruncated()) {
-		strcpy(g->Message, "MakeSQL: Out of memory");
+		safe_strcpy(g->Message, sizeof(g->Message), "MakeSQL: Out of memory");
 		return true;
 	} else
 		Query->Resize(len);
@@ -494,6 +574,7 @@ bool TDBEXT::MakeCommand(PGLOBAL g)
 	bool  qtd = Quoted > 0;
 	char  q = qtd ? *Quote : ' ';
 	int   i = 0, k = 0;
+	size_t stmt_sz = 0;
 
 	// Make a lower case copy of the originale query and change
 	// back ticks to the data source identifier quoting character
@@ -505,26 +586,30 @@ bool TDBEXT::MakeCommand(PGLOBAL g)
 		p[7] = 0;           // Remove where clause
 		Qrystr[(p - qrystr) + 7] = 0;
 		body = To_CondFil->Body;
-		stmt = (char*)PlugSubAlloc(g, NULL, strlen(qrystr)
-			+ strlen(body) + 64);
+		stmt_sz = strlen(qrystr) + strlen(body) + 64;
 	} else
-		stmt = (char*)PlugSubAlloc(g, NULL, strlen(Qrystr) + 64);
+		stmt_sz = strlen(Qrystr) + 64;
+	stmt = (char*)PlugSubAlloc(g, NULL, stmt_sz);
 
 	// Check whether the table name is equal to a keyword
 	// If so, it must be quoted in the original query
-	strlwr(strcat(strcat(strcpy(name, " "), Name), " "));
+	snprintf(name, sizeof(name), " %s ", Name);
+	strlwr(name);
 
 	if (strstr(" update delete low_priority ignore quick from ", name)) {
 		if (Quote) {
-			strlwr(strcat(strcat(strcpy(name, Quote), Name), Quote));
+			snprintf(name, sizeof(name), "%s%s%s", Quote, Name, Quote);
+			strlwr(name);
 			k += 2;
 		} else {
-			strcpy(g->Message, "Quoted must be specified");
+			safe_strcpy(g->Message, sizeof(g->Message), "Quoted must be specified");
 			return true;
 		}	// endif Quote
 
-	} else
-		strlwr(strcpy(name, Name));     // Not a keyword
+	} else {
+		safe_strcpy(name, sizeof(name), Name);     // Not a keyword
+		strlwr(name);
+	}
 
 	if ((p = strstr(qrystr, name))) {
 		for (i = 0; i < p - qrystr; i++)
@@ -538,21 +623,29 @@ bool TDBEXT::MakeCommand(PGLOBAL g)
 			schmp = Schema;
 
 		if (qtd && *(p - 1) == ' ') {
-			if (schmp)
-				strcat(strcat(stmt, schmp), ".");
+			if (schmp) {
+				safe_strcat(stmt, stmt_sz, schmp);
+				safe_strcat(stmt, stmt_sz, ".");
+			}
 
-			strcat(strcat(strcat(stmt, Quote), TableName), Quote);
+			safe_strcat(stmt, stmt_sz, Quote);
+			safe_strcat(stmt, stmt_sz, TableName);
+			safe_strcat(stmt, stmt_sz, Quote);
 		} else {
 			if (schmp) {
 				if (qtd && *(p - 1) != ' ') {
 					stmt[i - 1] = 0;
-					strcat(strcat(strcat(stmt, schmp), "."), Quote);
-				} else
-					strcat(strcat(stmt, schmp), ".");
+					safe_strcat(stmt, stmt_sz, schmp);
+					safe_strcat(stmt, stmt_sz, ".");
+					safe_strcat(stmt, stmt_sz, Quote);
+				} else {
+					safe_strcat(stmt, stmt_sz, schmp);
+					safe_strcat(stmt, stmt_sz, ".");
+				}
 
 			}	// endif schmp
 
-			strcat(stmt, TableName);
+			safe_strcat(stmt, stmt_sz, TableName);
 		} // endif's
 
 		i = (int)strlen(stmt);
@@ -564,10 +657,10 @@ bool TDBEXT::MakeCommand(PGLOBAL g)
 		RemoveConst(g, stmt);
 
 		if (body)
-			strcat(stmt, body);
+			safe_strcat(stmt, stmt_sz, body);
 
 	} else {
-		sprintf(g->Message, "Cannot use this %s command",
+		snprintf(g->Message, sizeof(g->Message), "Cannot use this %s command",
 			(Mode == MODE_UPDATE) ? "UPDATE" : "DELETE");
 		return true;
 	} // endif p
@@ -678,7 +771,7 @@ EXTCOL::EXTCOL(PEXTCOL col1, PTDB tdbp) : COLBLK(col1, tdbp)
 bool EXTCOL::SetBuffer(PGLOBAL g, PVAL value, bool ok, bool check)
 {
 	if (!(To_Val = value)) {
-		sprintf(g->Message, MSG(VALUE_ERROR), Name);
+		snprintf(g->Message, sizeof(g->Message), MSG(VALUE_ERROR), Name);
 		return true;
 	} else if (Buf_Type == value->GetType()) {
 		// Values are of the (good) column type
@@ -697,7 +790,7 @@ bool EXTCOL::SetBuffer(PGLOBAL g, PVAL value, bool ok, bool check)
 	} else {
 		// Values are not of the (good) column type
 		if (check) {
-			sprintf(g->Message, MSG(TYPE_VALUE_ERR), Name,
+			snprintf(g->Message, sizeof(g->Message), MSG(TYPE_VALUE_ERR), Name,
 				GetTypeName(Buf_Type), GetTypeName(value->GetType()));
 			return true;
 		} // endif check

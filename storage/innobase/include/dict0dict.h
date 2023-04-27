@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2021, MariaDB Corporation.
+Copyright (c) 2013, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -132,7 +132,7 @@ enum dict_table_op_t {
 @param[in]      table_op        operation to perform when opening
 @return table object after locking MDL shared
 @retval NULL if the table is not readable, or if trylock && MDL blocked */
-template<bool trylock>
+template<bool trylock, bool purge_thd= false>
 dict_table_t*
 dict_acquire_mdl_shared(dict_table_t *table,
                         THD *thd,
@@ -146,6 +146,7 @@ dict_acquire_mdl_shared(dict_table_t *table,
 @param[in,out]  thd             background thread, or NULL to not acquire MDL
 @param[out]     mdl             mdl ticket, or NULL
 @return table, NULL if does not exist */
+template<bool purge_thd= false>
 dict_table_t*
 dict_table_open_on_id(table_id_t table_id, bool dict_locked,
                       dict_table_op_t table_op, THD *thd= nullptr,
@@ -368,12 +369,8 @@ dberr_t
 dict_table_rename_in_cache(
 /*=======================*/
 	dict_table_t*	table,		/*!< in/out: table */
-	const char*	new_name,	/*!< in: new name */
-	bool		rename_also_foreigns,
-					/*!< in: in ALTER TABLE we want
-					to preserve the original table name
-					in constraints which reference it */
-	bool		replace_new_file = false)
+	span<const char> new_name,	/*!< in: new name */
+	bool		replace_new_file)
 					/*!< in: whether to replace the
 					file with the new name
 					(as part of rolling back TRUNCATE) */
@@ -424,14 +421,6 @@ dict_foreign_add_to_cache(
 	dict_err_ignore_t	ignore_err)
 				/*!< in: error to be ignored */
 	MY_ATTRIBUTE((nonnull(1), warn_unused_result));
-/*********************************************************************//**
-Checks if a table is referenced by foreign keys.
-@return TRUE if table is referenced by a foreign key */
-ibool
-dict_table_is_referenced_by_foreign_key(
-/*====================================*/
-	const dict_table_t*	table)	/*!< in: InnoDB table */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
 /**********************************************************************//**
 Replace the index passed in with another equivalent index in the
 foreign key lists of the table.
@@ -640,19 +629,6 @@ dict_table_get_next_index(
 # define dict_table_get_last_index(table) UT_LIST_GET_LAST((table)->indexes)
 # define dict_table_get_next_index(index) UT_LIST_GET_NEXT(indexes, index)
 #endif /* UNIV_DEBUG */
-
-/* Skip corrupted index */
-#define dict_table_skip_corrupt_index(index)			\
-	while (index && index->is_corrupted()) {		\
-		index = dict_table_get_next_index(index);	\
-	}
-
-/* Get the next non-corrupt index */
-#define dict_table_next_uncorrupted_index(index)		\
-do {								\
-	index = dict_table_get_next_index(index);		\
-	dict_table_skip_corrupt_index(index);			\
-} while (0)
 
 #define dict_index_is_clust(index) (index)->is_clust()
 #define dict_index_is_auto_gen_clust(index) (index)->is_gen_clust()
@@ -928,17 +904,6 @@ dict_table_copy_types(
 	dtuple_t*		tuple,	/*!< in/out: data tuple */
 	const dict_table_t*	table)	/*!< in: table */
 	MY_ATTRIBUTE((nonnull));
-/**********************************************************************//**
-Looks for an index with the given id. NOTE that we do not acquire
-dict_sys.latch: this function is for emergency purposes like
-printing info of a corrupt database page!
-@return index or NULL if not found from cache */
-dict_index_t*
-dict_index_find_on_id_low(
-/*======================*/
-	index_id_t	id)	/*!< in: index id */
-	MY_ATTRIBUTE((warn_unused_result));
-
 /** Adds an index to the dictionary cache, with possible indexing newly
 added column.
 @param[in,out]	index	index; NOTE! The index memory
@@ -1108,16 +1073,16 @@ dict_table_get_nth_col_pos(
 	ulint			n,	/*!< in: column number */
 	ulint*			prefix_col_pos) /*!< out: col num if prefix */
 	MY_ATTRIBUTE((nonnull(1), warn_unused_result));
-/*******************************************************************//**
-Adds a column to index. */
-void
-dict_index_add_col(
-/*===============*/
-	dict_index_t*		index,		/*!< in/out: index */
-	const dict_table_t*	table,		/*!< in: table */
-	dict_col_t*		col,		/*!< in: column */
-	ulint			prefix_len)	/*!< in: column prefix length */
-	MY_ATTRIBUTE((nonnull));
+/** Add a column to an index.
+@param index          index
+@param table          table
+@param col            column
+@param prefix_len     column prefix length
+@param descending     whether to use descending order */
+void dict_index_add_col(dict_index_t *index, const dict_table_t *table,
+                        dict_col_t *col, ulint prefix_len,
+                        bool descending= false)
+  MY_ATTRIBUTE((nonnull));
 
 /*******************************************************************//**
 Copies types of fields contained in index to tuple. */
@@ -1350,10 +1315,10 @@ class dict_sys_t
   std::atomic<ulonglong> latch_ex_wait_start;
 
   /** the rw-latch protecting the data dictionary cache */
-  MY_ALIGNED(CACHE_LINE_SIZE) srw_lock latch;
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) srw_lock latch;
 #ifdef UNIV_DEBUG
   /** whether latch is being held in exclusive mode (by any thread) */
-  bool latch_ex;
+  Atomic_relaxed<pthread_t> latch_ex;
   /** number of S-latch holders */
   Atomic_counter<uint32_t> latch_readers;
 #endif
@@ -1511,39 +1476,28 @@ public:
   }
 #endif
 
-  /** Move a table to the non-LRU list from the LRU list.
-  @return whether the table was evictable */
-  bool prevent_eviction(dict_table_t *table)
+  /** Move a table to the non-LRU list from the LRU list. */
+  void prevent_eviction(dict_table_t *table)
   {
     ut_d(locked());
     ut_ad(find(table));
     if (!table->can_be_evicted)
-      return false;
+      return;
     table->can_be_evicted= false;
     UT_LIST_REMOVE(table_LRU, table);
     UT_LIST_ADD_LAST(table_non_LRU, table);
-    return true;
-  }
-  /** Move a table from the non-LRU list to the LRU list. */
-  void allow_eviction(dict_table_t *table)
-  {
-    ut_d(locked());
-    ut_ad(find(table));
-    ut_ad(!table->can_be_evicted);
-    table->can_be_evicted= true;
-    UT_LIST_REMOVE(table_non_LRU, table);
-    UT_LIST_ADD_FIRST(table_LRU, table);
   }
 
 #ifdef UNIV_DEBUG
   /** @return whether any thread (not necessarily the current thread)
   is holding the latch; that is, this check may return false
   positives */
-  bool frozen() const { return latch_readers || locked(); }
+  bool frozen() const { return latch_readers || latch_ex; }
   /** @return whether any thread (not necessarily the current thread)
-  is holding the exclusive latch; that is, this check may return false
-  positives */
-  bool locked() const { return latch_ex; }
+  is holding a shared latch */
+  bool frozen_not_locked() const { return latch_readers; }
+  /** @return whether the current thread holds the exclusive latch */
+  bool locked() const { return latch_ex == pthread_self(); }
 #endif
 private:
   /** Acquire the exclusive latch */
@@ -1562,11 +1516,11 @@ public:
     {
       ut_ad(!latch_readers);
       ut_ad(!latch_ex);
-      ut_d(latch_ex= true);
+      ut_d(latch_ex= pthread_self());
     }
     else
       lock_wait(SRW_LOCK_ARGS(file, line));
-   }
+  }
 
 #ifdef UNIV_PFS_RWLOCK
   /** Unlock the data dictionary cache. */
@@ -1579,9 +1533,9 @@ public:
   /** Unlock the data dictionary cache. */
   void unlock()
   {
-    ut_ad(latch_ex);
+    ut_ad(latch_ex == pthread_self());
     ut_ad(!latch_readers);
-    ut_d(latch_ex= false);
+    ut_d(latch_ex= 0);
     latch.wr_unlock();
   }
   /** Acquire a shared lock on the dictionary cache. */
@@ -1673,40 +1627,12 @@ dict_fs2utf8(
 	size_t		table_utf8_size)/*!< in: table_utf8 size */
 	MY_ATTRIBUTE((nonnull));
 
-/**********************************************************************//**
-Check whether the table is corrupted.
-@return nonzero for corrupted table, zero for valid tables */
-UNIV_INLINE
-ulint
-dict_table_is_corrupted(
-/*====================*/
-	const dict_table_t*	table)	/*!< in: table */
-	MY_ATTRIBUTE((nonnull, warn_unused_result));
-
-/** Flag an index and table corrupted both in the data dictionary cache
+/** Flag an index corrupted both in the data dictionary cache
 and in the system table SYS_INDEXES.
 @param index       index to be flagged as corrupted
-@param ctx         context (for error log reporting)
-@param dict_locked whether dict_sys.latch is held in exclusive mode */
-void dict_set_corrupted(dict_index_t *index, const char *ctx, bool dict_locked)
+@param ctx         context (for error log reporting) */
+void dict_set_corrupted(dict_index_t *index, const char *ctx)
   ATTRIBUTE_COLD __attribute__((nonnull));
-
-/** Flags an index corrupted in the data dictionary cache only. This
-is used mostly to mark a corrupted index when index's own dictionary
-is corrupted, and we force to load such index for repair purpose
-@param[in,out]	index	index that is corrupted */
-void
-dict_set_corrupted_index_cache_only(
-	dict_index_t*	index);
-
-/**********************************************************************//**
-Flags a table with specified space_id corrupted in the table dictionary
-cache.
-@return TRUE if successful */
-bool dict_set_corrupted_by_space(const fil_space_t* space);
-
-/** Flag a table encrypted in the data dictionary cache. */
-void dict_set_encrypted_by_space(const fil_space_t* space);
 
 /** Sets merge_threshold in the SYS_INDEXES
 @param[in,out]	index		index
@@ -1814,6 +1740,6 @@ bool
 dict_table_have_virtual_index(
 	dict_table_t*	table);
 
-#include "dict0dict.ic"
+#include "dict0dict.inl"
 
 #endif

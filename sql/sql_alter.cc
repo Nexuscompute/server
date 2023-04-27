@@ -19,6 +19,9 @@
 #include "sql_table.h"                       // mysql_alter_table,
                                              // mysql_exchange_partition
 #include "sql_alter.h"
+#include "rpl_mi.h"
+#include "slave.h"
+#include "debug_sync.h"
 #include "wsrep_mysqld.h"
 
 Alter_info::Alter_info(const Alter_info &rhs, MEM_ROOT *mem_root)
@@ -510,8 +513,18 @@ bool Sql_cmd_alter_table::execute(THD *thd)
       DBUG_RETURN(TRUE);
     }
 
-    thd->variables.auto_increment_offset = 1;
-    thd->variables.auto_increment_increment = 1;
+    /*
+      It makes sense to set auto_increment_* to defaults in TOI operations.
+      Must be done before wsrep_TOI_begin() since Query_log_event encapsulating
+      TOI statement and auto inc variables for wsrep replication is constructed
+      there. Variables are reset back in THD::reset_for_next_command() before
+      processing of next command.
+    */
+    if (wsrep_auto_increment_control)
+    {
+      thd->variables.auto_increment_offset = 1;
+      thd->variables.auto_increment_increment = 1;
+    }
   }
 #endif
 
@@ -541,9 +554,11 @@ bool Sql_cmd_alter_table::execute(THD *thd)
   thd->work_part_info= 0;
 #endif
 
+  Recreate_info recreate_info;
   result= mysql_alter_table(thd, &select_lex->db, &lex->name,
                             &create_info,
                             first_table,
+                            &recreate_info,
                             &alter_info,
                             select_lex->order_list.elements,
                             select_lex->order_list.first,

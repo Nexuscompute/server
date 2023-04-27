@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2005, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2017, MariaDB
+   Copyright (c) 2010, 2022, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -23,7 +23,7 @@
   then reporting the timing of each stage.
 
   MySQL slap runs three stages:
-  1) Create schema,table, and optionally any SP or data you want to beign
+  1) Create schema,table, and optionally any SP or data you want to begin
      the test with. (single client)
   2) Load test (many clients)
   3) Cleanup (disconnection, drop table if specified, single client)
@@ -304,7 +304,10 @@ void set_mysql_connect_options(MYSQL *mysql)
                   opt_ssl_capath, opt_ssl_cipher);
     mysql_options(mysql, MYSQL_OPT_SSL_CRL, opt_ssl_crl);
     mysql_options(mysql, MYSQL_OPT_SSL_CRLPATH, opt_ssl_crlpath);
+    mysql_options(mysql, MARIADB_OPT_TLS_VERSION, opt_tls_version);
   }
+  mysql_options(mysql, MYSQL_OPT_SSL_VERIFY_SERVER_CERT,
+                (char*)&opt_ssl_verify_server_cert);
 #endif
   if (opt_protocol)
     mysql_options(mysql,MYSQL_OPT_PROTOCOL,(char*)&opt_protocol);
@@ -1832,6 +1835,7 @@ run_scheduler(stats *sptr, statement *stmts, uint concur, ulonglong limit)
   uint x;
   struct timeval start_time, end_time;
   thread_context con;
+  int error;
   pthread_t mainthread;            /* Thread descriptor */
   pthread_attr_t attr;          /* Thread attributes */
   DBUG_ENTER("run_scheduler");
@@ -1840,8 +1844,11 @@ run_scheduler(stats *sptr, statement *stmts, uint concur, ulonglong limit)
   con.limit= limit;
 
   pthread_attr_init(&attr);
-  pthread_attr_setdetachstate(&attr,
-		  PTHREAD_CREATE_DETACHED);
+  if ((error= pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED)))
+  {
+    printf("Got error: %d from pthread_attr_setdetachstate\n", error);
+    exit(1);
+  }
 
   pthread_mutex_lock(&counter_mutex);
   thread_counter= 0;
@@ -1897,12 +1904,11 @@ run_scheduler(stats *sptr, statement *stmts, uint concur, ulonglong limit)
 
 pthread_handler_t run_task(void *p)
 {
-  ulonglong counter= 0, queries;
+  ulonglong queries;
   ulonglong detach_counter;
   unsigned int commit_counter;
   MYSQL *mysql;
   MYSQL_RES *result;
-  MYSQL_ROW row;
   statement *ptr;
   thread_context *con= (thread_context *)p;
 
@@ -2023,8 +2029,7 @@ limit_not_met:
                     my_progname, mysql_errno(mysql), mysql_error(mysql));
           else
           {
-            while ((row= mysql_fetch_row(result)))
-              counter++;
+            while (mysql_fetch_row(result)) {}
             mysql_free_result(result);
           }
         }
@@ -2034,7 +2039,7 @@ limit_not_met:
       if (commit_rate && (++commit_counter == commit_rate))
       {
         commit_counter= 0;
-        run_query(mysql, "COMMIT", strlen("COMMIT"));
+        run_query(mysql, C_STRING_WITH_LEN("COMMIT"));
       }
 
       if (con->limit && queries == con->limit)
@@ -2046,7 +2051,7 @@ limit_not_met:
 
 end:
   if (commit_rate)
-    run_query(mysql, "COMMIT", strlen("COMMIT"));
+    run_query(mysql, C_STRING_WITH_LEN("COMMIT"));
 
   mysql_close(mysql);
 
@@ -2086,7 +2091,7 @@ parse_option(const char *origin, option_string **stmt, char delm)
     char *buffer_ptr;
 
     /*
-      Return an error if the length of the any of the comma seprated value
+      Return an error if the length of the comma separated values
       exceeds HUGE_STRING_LENGTH.
     */
     if ((size_t)(retstr - ptr) > HUGE_STRING_LENGTH)
@@ -2132,7 +2137,7 @@ parse_option(const char *origin, option_string **stmt, char delm)
     char *origin_ptr;
 
     /*
-      Return an error if the length of the any of the comma seprated value
+      Return an error if the length of any of the comma separated values
       exceeds HUGE_STRING_LENGTH.
     */
     if (strlen(ptr) > HUGE_STRING_LENGTH)

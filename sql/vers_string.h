@@ -40,6 +40,8 @@ struct Compare_identifiers
 {
   int operator()(const LEX_CSTRING& a, const LEX_CSTRING& b) const
   {
+    DBUG_ASSERT(a.str != NULL);
+    DBUG_ASSERT(b.str != NULL);
     DBUG_ASSERT(a.str[a.length] == 0);
     DBUG_ASSERT(b.str[b.length] == 0);
     return my_strcasecmp(system_charset_info, a.str, b.str);
@@ -51,7 +53,7 @@ template <class Compare>
 struct Lex_cstring_with_compare : public Lex_cstring
 {
 public:
-  Lex_cstring_with_compare() {}
+  Lex_cstring_with_compare() = default;
   Lex_cstring_with_compare(const char *_str, size_t _len) :
     Lex_cstring(_str, _len)
   { }

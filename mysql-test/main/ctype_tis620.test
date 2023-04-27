@@ -169,7 +169,7 @@ SET collation_connection='tis620_bin';
 --echo #
 --echo # Start of 5.6 tests
 --echo #
-
+--disable_service_connection
 --echo #
 --echo # WL#3664 WEIGHT_STRING
 --echo #
@@ -186,8 +186,11 @@ set collation_connection=tis620_bin;
 --source include/weight_string.inc
 --source include/weight_string_l1.inc
 --source include/ctype_pad_space.inc
+#enable after fix MDEV-29290
+--disable_view_protocol
 select hex(weight_string(cast(0xE0A1 as char)));
 select hex(weight_string(cast(0xE0A1 as char) as char(1)));
+--enable_view_protocol
 
 --echo #
 --echo # End of 5.6 tests
@@ -208,6 +211,7 @@ let $coll_pad='tis620_thai_ci';
 let $coll='tis620_nopad_bin';
 let $coll_pad='tis620_bin';
 --source include/ctype_pad_all_engines.inc
+--enable_service_connection
 
 --echo #
 --echo # MDEV-24901 SIGSEGV in fts_get_table_name, SIGSEGV in ib_vector_size, SIGSEGV in row_merge_fts_doc_tokenize, stack smashing
@@ -218,4 +222,35 @@ SELECT HEX(WEIGHT_STRING(_tis620 'a\0b' COLLATE tis620_thai_nopad_ci));
 
 --echo #
 --echo # End of 10.2 tests
+--echo #
+
+--echo #
+--echo # Start of 10.4 tests
+--echo #
+
+--echo #
+--echo # MDEV-27670 Assertion `(cs->state & 0x20000) == 0' failed in my_strnncollsp_nchars_generic_8bit
+--echo #
+
+CREATE OR REPLACE TABLE t1
+(
+  a VARCHAR(250) COLLATE tis620_thai_nopad_ci,
+  UNIQUE KEY(a(100)) USING HASH
+) ENGINE=MyISAM;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES ('a'),('A');
+DROP TABLE t1;
+
+CREATE OR REPLACE TABLE t1
+
+(
+  a CHAR(250) COLLATE tis620_thai_nopad_ci,
+  UNIQUE KEY(a(100)) USING HASH
+) ENGINE=MyISAM;
+--error ER_DUP_ENTRY
+INSERT INTO t1 VALUES ('a'),('A');
+DROP TABLE t1;
+
+--echo #
+--echo # End of 10.4 tests
 --echo #

@@ -1,4 +1,6 @@
 --source include/not_embedded.inc
+
+--disable_service_connection
 #
 # SHUTDOWN statement
 #
@@ -16,8 +18,8 @@ disconnect c1;
 create procedure try_shutdown() shutdown;
 drop procedure try_shutdown;
 
---let $_server_id= `SELECT @@server_id`
---let $_expect_file_name= $MYSQLTEST_VARDIR/tmp/mysqld.$_server_id.expect
+--let $_expect_file_name= `select regexp_replace(@@tmpdir, '^.*/','')`
+--let $_expect_file_name= $MYSQLTEST_VARDIR/tmp/$_expect_file_name.expect
 --exec echo "wait" > $_expect_file_name
 
 --send shutdown
@@ -36,3 +38,4 @@ drop user user1@localhost;
 --let SEARCH_FILE= $MYSQLTEST_VARDIR/log/mysqld.1.err
 --let SEARCH_PATTERN=(mysqld|mariadbd)(\.exe)? \(initiated by: root\[root\] @ localhost \[(::1)?\]\): Normal shutdown
 --source include/search_pattern_in_file.inc
+--enable_service_connection

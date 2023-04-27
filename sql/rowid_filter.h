@@ -192,7 +192,10 @@ public:
   */
   virtual bool check(void *ctxt, char *elem) = 0;
 
-  virtual ~Rowid_filter_container() {}
+  /* True if the container does not contain any element */
+  virtual bool is_empty() = 0;
+
+  virtual ~Rowid_filter_container() = default;
 };
 
 
@@ -229,7 +232,9 @@ public:
   */
   virtual bool check(char *elem) = 0;
 
-  virtual ~Rowid_filter() {}
+  virtual ~Rowid_filter() = default;
+
+  bool is_empty() { return container->is_empty(); }
 
   Rowid_filter_container *get_container() { return container; }
 
@@ -268,6 +273,8 @@ public:
 
   bool check(char *elem)
   {
+    if (container->is_empty())
+      return false;
     bool was_checked= container->check(table, elem);
     tracker->increment_checked_elements_count(was_checked);
     return was_checked;
@@ -340,6 +347,8 @@ public:
     my_qsort2(array->front(), array->elements()/elem_size,
               elem_size, (qsort2_cmp) cmp, cmp_arg);
   }
+
+  bool is_empty() { return elements() == 0; }
 };
 
 
@@ -369,6 +378,8 @@ public:
   bool add(void *ctxt, char *elem) { return refpos_container.add(elem); }
 
   bool check(void *ctxt, char *elem);
+
+  bool is_empty() { return refpos_container.is_empty(); }
 };
 
 /**

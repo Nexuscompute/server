@@ -1673,7 +1673,7 @@ end:
   {
     table->file->ha_index_or_rnd_end();
     ha_commit_trans(thd, FALSE);
-    ha_commit_trans(thd, TRUE);
+    trans_commit(thd);
   }
   if (table_opened)
   {
@@ -2152,16 +2152,24 @@ rpl_group_info::reinit(Relay_log_info *rli)
   long_find_row_note_printed= false;
   did_mark_start_commit= false;
   gtid_ev_flags2= 0;
+  gtid_ev_flags_extra= 0;
+  gtid_ev_sa_seq_no= 0;
   last_master_timestamp = 0;
   gtid_ignore_duplicate_state= GTID_DUPLICATE_NULL;
   speculation= SPECULATE_NO;
+  rpt= NULL;
+  start_alter_ev= NULL;
+  direct_commit_alter= false;
   commit_orderer.reinit();
 }
 
 rpl_group_info::rpl_group_info(Relay_log_info *rli)
   : thd(0), wait_commit_sub_id(0),
     wait_commit_group_info(0), parallel_entry(0),
-    deferred_events(NULL), m_annotate_event(0), is_parallel_exec(false)
+    deferred_events(NULL), m_annotate_event(0), is_parallel_exec(false),
+    gtid_ev_flags2(0), gtid_ev_flags_extra(0), gtid_ev_sa_seq_no(0),
+    reserved_start_alter_thread(0), finish_event_group_called(0), rpt(NULL),
+    start_alter_ev(NULL), direct_commit_alter(false), sa_info(NULL)
 {
   reinit(rli);
   bzero(&current_gtid, sizeof(current_gtid));
@@ -2169,7 +2177,6 @@ rpl_group_info::rpl_group_info(Relay_log_info *rli)
                    MY_MUTEX_INIT_FAST);
   mysql_cond_init(key_rpl_group_info_sleep_cond, &sleep_cond, NULL);
 }
-
 
 rpl_group_info::~rpl_group_info()
 {
@@ -2195,6 +2202,7 @@ event_group_new_gtid(rpl_group_info *rgi, Gtid_log_event *gev)
   rgi->current_gtid.seq_no= gev->seq_no;
   rgi->commit_id= gev->commit_id;
   rgi->gtid_pending= true;
+  rgi->sa_info= NULL;
   return 0;
 }
 
@@ -2288,11 +2296,9 @@ void rpl_group_info::cleanup_context(THD *thd, bool error)
 
   if (unlikely(error))
   {
-    /*
-      trans_rollback above does not rollback XA transactions
-      (todo/fixme consider to do so.
-    */
-    if (thd->transaction->xid_state.is_explicit_XA())
+    // leave alone any XA prepared transactions
+    if (thd->transaction->xid_state.is_explicit_XA() &&
+        thd->transaction->xid_state.get_state_code() != XA_PREPARED)
       xa_trans_force_rollback(thd);
 
     thd->release_transactional_locks();
@@ -2430,8 +2436,13 @@ mark_start_commit_inner(rpl_parallel_entry *e, group_commit_orderer *gco,
   uint64 count= ++e->count_committing_event_groups;
   /* Signal any following GCO whose wait_count has been reached now. */
   tmp= gco;
+
+  DBUG_ASSERT(!tmp->gc_done);
+
   while ((tmp= tmp->next_gco))
   {
+    DBUG_ASSERT(!tmp->gc_done);
+
     uint64 wait_count= tmp->wait_count;
     if (wait_count > count)
       break;

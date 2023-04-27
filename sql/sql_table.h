@@ -165,6 +165,7 @@ bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
                        const LEX_CSTRING *new_name,
                        HA_CREATE_INFO *create_info,
                        TABLE_LIST *table_list,
+                       class Recreate_info *recreate_info,
                        Alter_info *alter_info,
                        uint order_num, ORDER *order, bool ignore,
                        bool if_exists);
@@ -172,7 +173,8 @@ bool mysql_compare_tables(TABLE *table,
                           Alter_info *alter_info,
                           HA_CREATE_INFO *create_info,
                           bool *metadata_equal);
-bool mysql_recreate_table(THD *thd, TABLE_LIST *table_list, bool table_copy);
+bool mysql_recreate_table(THD *thd, TABLE_LIST *table_list,
+                          class Recreate_info *recreate_info, bool table_copy);
 bool mysql_create_like_table(THD *thd, TABLE_LIST *table,
                              TABLE_LIST *src_table,
                              Table_specification_st *create_info);
@@ -211,7 +213,8 @@ int write_bin_log(THD *thd, bool clear_error,
                   char const *query, ulong query_length,
                   bool is_trans= FALSE);
 int write_bin_log_with_if_exists(THD *thd, bool clear_error,
-                                 bool is_trans, bool add_if_exists);
+                                 bool is_trans, bool add_if_exists,
+                                 bool commit_alter= false);
 
 void promote_first_timestamp_column(List<Create_field> *column_definitions);
 

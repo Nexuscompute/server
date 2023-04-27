@@ -4,6 +4,8 @@ SET(CPACK_RPM_rocksdb-engine_PACKAGE_SUMMARY "RocksDB storage engine for MariaDB
 SET(CPACK_RPM_rocksdb-engine_PACKAGE_DESCRIPTION "The RocksDB storage engine is a high performance storage engine, aimed
 at maximising storage efficiency while maintaining InnoDB-like performance." PARENT_SCOPE)
 
+MY_CHECK_AND_SET_COMPILER_FLAG(-Wno-range-loop-construct)
+
 MACRO(SKIP_ROCKSDB_PLUGIN msg)
   MESSAGE_ONCE(SKIP_ROCKSDB_PLUGIN "Can't build rocksdb engine - ${msg}")
   ADD_FEATURE_INFO(ROCKSDB "OFF" "Storage Engine")
@@ -132,7 +134,8 @@ SET(ROCKSDB_SE_SOURCES
 # This is a strong requirement coming from RocksDB. No conditional checks here.
 #ADD_DEFINITIONS(-DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX
 #)
-if(CMAKE_SYSTEM_PROCESSOR STREQUAL "riscv64")
+
+if (HAVE_GCC_C11_ATOMICS_WITH_LIBATOMIC)
   SET(ATOMIC_EXTRA_LIBS -latomic)
 else()
   SET(ATOMIC_EXTRA_LIBS)
@@ -190,7 +193,7 @@ ADD_DEPENDENCIES(rocksdb_aux_lib GenError)
 
 # MARIAROCKS-TODO: how to properly depend on -lrt ?
 TARGET_LINK_LIBRARIES(rocksdb_aux_lib rocksdblib ${ZLIB_LIBRARY})
-if (UNIX AND NOT APPLE)
+if (UNIX AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
   TARGET_LINK_LIBRARIES(rocksdb_aux_lib -lrt)
 endif()
 TARGET_LINK_LIBRARIES(rocksdb_aux_lib ${ATOMIC_EXTRA_LIBS})
@@ -241,7 +244,7 @@ ENDIF()
 #  ADD_SUBDIRECTORY(unittest)
 #ENDIF()
 
-if (UNIX AND NOT APPLE)
+if (UNIX AND NOT APPLE AND NOT CMAKE_SYSTEM_NAME STREQUAL "OpenBSD")
   SET(rocksdb_static_libs ${rocksdb_static_libs} "-lrt")
 endif()
 

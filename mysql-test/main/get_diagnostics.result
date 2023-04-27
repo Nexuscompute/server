@@ -790,6 +790,19 @@ SHOW STATUS LIKE 'Com%get_diagnostics';
 Variable_name	Value
 Com_get_diagnostics	1
 #
+# MDEV-26695: Number of an invalid row is not calculated for table value constructor
+#
+CREATE TABLE t1 (a CHAR(1)) VALUES ('a'),('b'),('foo');
+Warnings:
+Warning	1406	Data too long for column 'a' at row 3
+CREATE TABLE t2 (a char(1)) VALUES ('a'),('b') UNION VALUES ('foo');
+Warnings:
+Warning	1406	Data too long for column 'a' at row 3
+DROP TABLE t1, t2;
+#
+# End of 10.6 tests
+#
+#
 # MDEV-10075: Provide index of error causing error in array INSERT
 #
 #
@@ -1139,11 +1152,11 @@ SELECT @var62, @var63;
 @var62	@var63
 1	NULL
 INSERT INTO t1 SELECT id2, val2, p2 from t2;
-ERROR 22007: Incorrect double value: '\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x004@\x00\x00\x00\x00\x00\x00$@' for column `test`.`t1`.`d1` at row 1
+ERROR HY000: Cannot cast 'point' as 'double' in assignment of `test`.`t1`.`d1`
 GET DIAGNOSTICS CONDITION 1 @var64= ROW_NUMBER;
 GET DIAGNOSTICS CONDITION 2 @var65= ROW_NUMBER;
 Warnings:
-Error	1366	Incorrect double value: '\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x004@\x00\x00\x00\x00\x00\x00$@' for column `test`.`t1`.`d1` at row 1
+Error	4078	Cannot cast 'point' as 'double' in assignment of `test`.`t1`.`d1`
 Error	1758	Invalid condition number
 SELECT @var64, @var65;
 @var64	@var65
@@ -1383,11 +1396,11 @@ SELECT @var103, @var104;
 @var103	@var104
 1	NULL
 INSERT INTO t1 SELECT id2, val2, p2 from t2;
-ERROR 22007: Incorrect double value: '\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x004@\x00\x00\x00\x00\x00\x00$@' for column `test`.`t1`.`d1` at row 1
+ERROR HY000: Cannot cast 'point' as 'double' in assignment of `test`.`t1`.`d1`
 GET DIAGNOSTICS CONDITION 1 @var105= ROW_NUMBER;
 GET DIAGNOSTICS CONDITION 2 @var106= ROW_NUMBER;
 Warnings:
-Error	1366	Incorrect double value: '\x00\x00\x00\x00\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x004@\x00\x00\x00\x00\x00\x00$@' for column `test`.`t1`.`d1` at row 1
+Error	4078	Cannot cast 'point' as 'double' in assignment of `test`.`t1`.`d1`
 Error	1758	Invalid condition number
 SELECT @var105, @var106;
 @var105	@var106
@@ -1798,16 +1811,54 @@ val2
 val4
 DELETE FROM t WHERE a = 100;
 Warnings:
-Warning	1292	Truncated incorrect DOUBLE value: 'val1'
-Warning	1292	Truncated incorrect DOUBLE value: 'val2'
-Warning	1292	Truncated incorrect DOUBLE value: 'val4'
+Warning	1292	Truncated incorrect DECIMAL value: 'val1'
+Warning	1292	Truncated incorrect DECIMAL value: 'val2'
+Warning	1292	Truncated incorrect DECIMAL value: 'val4'
 SHOW WARNINGS;
 Level	Code	Message
-Warning	1292	Truncated incorrect DOUBLE value: 'val1'
-Warning	1292	Truncated incorrect DOUBLE value: 'val2'
-Warning	1292	Truncated incorrect DOUBLE value: 'val4'
+Warning	1292	Truncated incorrect DECIMAL value: 'val1'
+Warning	1292	Truncated incorrect DECIMAL value: 'val2'
+Warning	1292	Truncated incorrect DECIMAL value: 'val4'
 GET DIAGNOSTICS CONDITION 3 @n = ROW_NUMBER;
 SELECT @n;
 @n
 4
 DROP TABLE t;
+#
+# MDEV-26695: Number of an invalid row is not calculated for table value constructor
+#
+CREATE TABLE t1 (a CHAR(1)) VALUES ('a'),('b'),('foo');
+Warnings:
+Warning	1406	Data too long for column 'a' at row 3
+GET DIAGNOSTICS CONDITION 1 @n= ROW_NUMBER;
+SELECT @n;
+@n
+3
+CREATE TABLE t2 (a CHAR(1)) VALUES ('a'),('b') UNION VALUES ('foo');
+Warnings:
+Warning	1406	Data too long for column 'a' at row 3
+GET DIAGNOSTICS CONDITION 1 @n= ROW_NUMBER;
+SELECT @n;
+@n
+3
+DROP TABLE t1, t2;
+# Checking that CREATE ... SELECT works
+CREATE TABLE t1 (val1 CHAR(5));
+INSERT INTO t1 VALUES ('A'),('B'),('C'),('DEF');
+CREATE TABLE t2 (val2 CHAR(1)) SELECT val1 as val2 FROM t1;
+Warnings:
+Warning	1406	Data too long for column 'val2' at row 4
+GET DIAGNOSTICS CONDITION 1 @n= ROW_NUMBER;
+SELECT @n;
+@n
+4
+SELECT * FROM t2;
+val2
+A
+B
+C
+D
+DROP TABLE t1,t2;
+#
+# End of 10.7 tests
+#

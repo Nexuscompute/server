@@ -15,7 +15,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /*
-  A better inplementation of the UNIX ctype(3) library.
+  A better implementation of the UNIX ctype(3) library.
 */
 
 #ifndef _m_ctype_h
@@ -139,7 +139,7 @@ const uint16 *my_uca_contraction2_weight(const MY_CONTRACTIONS *c,
                                          my_wc_t wc1, my_wc_t wc2);
 
 
-/* Collation weights on a single level (e.g. primary, secondary, tertiarty) */
+/* Collation weights on a single level (e.g. primary, secondary, tertiary) */
 typedef struct my_uca_level_info_st
 {
   my_wc_t maxchar;
@@ -269,6 +269,28 @@ typedef enum enum_repertoire_t
 #define MY_STRXFRM_REVERSE_LEVEL6  0x00200000 /* if reverse order for level6 */
 #define MY_STRXFRM_REVERSE_SHIFT   16
 
+/* Flags to strnncollsp_nchars */
+/*
+  MY_STRNNCOLLSP_NCHARS_EMULATE_TRIMMED_TRAILING_SPACES -
+    defines if inside strnncollsp_nchars()
+    short strings should be virtually extended to "nchars"
+    characters by emulating trimmed trailing spaces.
+
+    This flag is needed when comparing packed strings of the CHAR
+    data type, when trailing spaces are trimmed on storage (like in InnoDB),
+    however the actual values (after unpacking) will have those trailing
+    spaces.
+
+    If this flag is passed, strnncollsp_nchars() performs both
+    truncating longer strings and extending shorter strings
+    to exactly "nchars".
+
+    If this flag is not passed, strnncollsp_nchars() only truncates longer
+    strings to "nchars", but does not extend shorter strings to "nchars".
+*/
+#define MY_STRNNCOLLSP_NCHARS_EMULATE_TRIMMED_TRAILING_SPACES 1
+
+
 /*
    Collation IDs for MariaDB that should not conflict with MySQL.
    We reserve 256..511, because MySQL will most likely use this range
@@ -351,6 +373,61 @@ struct my_collation_handler_st
 		       const uchar *, size_t, const uchar *, size_t, my_bool);
   int     (*strnncollsp)(CHARSET_INFO *,
                          const uchar *, size_t, const uchar *, size_t);
+  /*
+    strnncollsp_nchars() - similar to strnncollsp() but assumes that both
+                           strings were originally CHAR(N) values with the
+                           same N, then were optionally space-padded,
+                           or optionally space-trimmed.
+
+                           In other words, this function compares in the way
+                           if we insert both values into a CHAR(N) column
+                           and then compare the two column values.
+
+    It compares the same amount of characters from the two strings.
+    This is especially important for NOPAD collations.
+
+    If CHAR_LENGTH of the two strings are different,
+    the shorter string is virtually padded with trailing spaces
+    up to CHAR_LENGTH of the longer string, to guarantee that the
+    same amount of characters are compared.
+    This is important if the two CHAR(N) strings are space-trimmed 
+    (e.g. like in InnoDB compact format for CHAR).
+
+    The function compares not more than "nchars" characters only.
+    This can be useful to compare CHAR(N) space-padded strings
+    (when the exact N is known) without having to truncate them before
+    the comparison.
+
+    For example, Field_string stores a "CHAR(3) CHARACTER SET utf8mb4" value
+    of "aaa" as 12 bytes in a record buffer:
+    - 3 bytes of the actual data, followed by
+    - 9 bytes of spaces (just fillers, not real data)
+    The caller can pass nchars=3 to compare CHAR(3) record values.
+    In such case, the comparator won't go inside the 9 bytes of the fillers.
+
+    If N is not known, the caller can pass max(len1,len2) as the "nchars" value
+    (i.e. the maximum of the OCTET_LENGTH of the two strings).
+
+    Notes on complex collations.
+
+    This function counts contraction parts as individual characters.
+    For example, the Czech letter 'ch' (in Czech collations)
+    is ordinarily counted by the "nchars" limit as TWO characters
+    (although it is only one letter).
+    This corresponds to what CHAR(N) does in INSERT.
+
+    If the "nchars" limit tears apart a contraction, only the part fitting
+    into "nchars" characters is used. For example, in case of a Czech collation,
+    the string "ach" with nchars=2 is compared as 'ac': the contraction
+    'ch' is torn apart and the letter 'c' acts as an individual character.
+    This emulates the same comparison result with the scenario when we insert
+    'ach' into a CHAR(2) column and then compare it.
+  */
+  int     (*strnncollsp_nchars)(CHARSET_INFO *,
+                                const uchar *str1, size_t len1,
+                                const uchar *str2, size_t len2,
+                                size_t nchars,
+                                uint flags);
   size_t     (*strnxfrm)(CHARSET_INFO *,
                          uchar *dst, size_t dstlen, uint nweights,
                          const uchar *src, size_t srclen, uint flags);
@@ -1498,7 +1575,7 @@ uint32 my_convert(char *to, uint32 to_length, CHARSET_INFO *to_cs,
   An extended version of my_convert(), to pass non-default mb_wc() and wc_mb().
   For example, String::copy_printable() which is used in
   Protocol::store_warning() uses this to escape control
-  and non-convertable characters.
+  and non-convertible characters.
 */
 uint32 my_convert_using_func(char *to, size_t to_length, CHARSET_INFO *to_cs,
                              my_charset_conv_wc_mb mb_wc,
@@ -1579,7 +1656,7 @@ size_t my_convert_fix(CHARSET_INFO *dstcs, char *dst, size_t dst_length,
   @param str - the beginning of the string
   @param end - the string end (the next byte after the string)
   @return    >0, for a multi-byte character
-  @rerurn    0,  for a single byte character, broken sequence, empty string.
+  @return    0,  for a single byte character, broken sequence, empty string.
 */
 static inline
 uint my_ismbchar(CHARSET_INFO *cs, const char *str, const char *end)

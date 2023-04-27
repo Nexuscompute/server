@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2021, MariaDB Corporation.
+Copyright (c) 2015, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -339,27 +339,11 @@ struct trx_lock_t
   /** lock wait start time */
   Atomic_relaxed<my_hrtime_t> suspend_time;
 
+#if  defined(UNIV_DEBUG) || !defined(DBUG_OFF)
   /** 2=high priority WSREP thread has marked this trx to abort;
   1=another transaction chose this as a victim in deadlock resolution. */
   Atomic_relaxed<byte> was_chosen_as_deadlock_victim;
 
-  /** Clear the deadlock victim status. */
-  void clear_deadlock_victim()
-  {
-#ifndef WITH_WSREP
-    was_chosen_as_deadlock_victim= false;
-#elif defined __GNUC__ && (defined __i386__ || defined __x86_64__)
-    /* There is no 8-bit version of the 80386 BTR instruction.
-    Technically, this is the wrong addressing mode (16-bit), but
-    there are other data members stored after the byte. */
-    __asm__ __volatile__("lock btrw $0, %0"
-                         : "+m" (was_chosen_as_deadlock_victim));
-#else
-    was_chosen_as_deadlock_victim.fetch_and(byte(~1));
-#endif
-  }
-
-#ifdef WITH_WSREP
   /** Flag the lock owner as a victim in Galera conflict resolution. */
   void set_wsrep_victim()
   {
@@ -373,7 +357,17 @@ struct trx_lock_t
     was_chosen_as_deadlock_victim.fetch_or(2);
 # endif
   }
-#endif
+#else /* defined(UNIV_DEBUG) || !defined(DBUG_OFF) */
+
+  /** High priority WSREP thread has marked this trx to abort or
+  another transaction chose this as a victim in deadlock resolution. */
+  Atomic_relaxed<bool> was_chosen_as_deadlock_victim;
+
+  /** Flag the lock owner as a victim in Galera conflict resolution. */
+  void set_wsrep_victim() {
+    was_chosen_as_deadlock_victim= true;
+  }
+#endif /* defined(UNIV_DEBUG) || !defined(DBUG_OFF) */
 
   /** Next available rec_pool[] entry */
   byte rec_cached;
@@ -388,13 +382,13 @@ struct trx_lock_t
 					only be modified by the thread that is
 					serving the running transaction. */
 
-	/** Pre-allocated record locks */
-	struct {
-		ib_lock_t lock; byte pad[256];
-	} rec_pool[8];
+  /** Pre-allocated record locks */
+  struct {
+    alignas(CPU_LEVEL1_DCACHE_LINESIZE) ib_lock_t lock;
+  } rec_pool[8];
 
-	/** Pre-allocated table locks */
-	ib_lock_t	table_pool[8];
+  /** Pre-allocated table locks */
+  ib_lock_t table_pool[8];
 
   /** Memory heap for trx_locks. Protected by lock_sys.assert_locked()
   and lock_sys.is_writer() || trx->mutex_is_owner(). */
@@ -436,9 +430,15 @@ class trx_mod_table_time_t
   /** First modification of a system versioned column
   (NONE= no versioning, BULK= the table was dropped) */
   undo_no_t first_versioned= NONE;
+#ifdef UNIV_DEBUG
+  /** Whether the modified table is a FTS auxiliary table */
+  bool fts_aux_table= false;
+#endif /* UNIV_DEBUG */
 
   /** Buffer to store insert opertion */
   row_merge_bulk_t *bulk_store= nullptr;
+
+  friend struct trx_t;
 public:
   /** Constructor
   @param rows   number of modified rows so far */
@@ -500,6 +500,19 @@ public:
     return false;
   }
 
+#ifdef UNIV_DEBUG
+  void set_aux_table() { fts_aux_table= true; }
+
+  bool is_aux_table() const { return fts_aux_table; }
+#endif /* UNIV_DEBUG */
+
+  /** @return the first undo record that modified the table */
+  undo_no_t get_first() const
+  {
+    ut_ad(valid());
+    return LIMIT & first;
+  }
+
   /** Add the tuple to the transaction bulk buffer for the given index.
   @param entry  tuple to be inserted
   @param index  bulk insert for the index
@@ -512,22 +525,12 @@ public:
 
   /** Do bulk insert operation present in the buffered operation
   @return DB_SUCCESS or error code */
-  dberr_t write_bulk(dict_table_t *table, trx_t *trx)
-  {
-    if (!bulk_store)
-      return DB_SUCCESS;
-    dberr_t err= bulk_store->write_to_table(table, trx);
-    delete bulk_store;
-    bulk_store= nullptr;
-    return err;
-  }
+  dberr_t write_bulk(dict_table_t *table, trx_t *trx);
 
   /** @return whether the buffer storage exist */
-  bool bulk_buffer_exist()
+  bool bulk_buffer_exist() const
   {
-    if (is_bulk_insert() && bulk_store)
-      return true;
-    return false;
+    return bulk_store && is_bulk_insert();
   }
 };
 
@@ -562,7 +565,7 @@ no longer be associated with a session when the server is restarted.
 
 A session may be served by at most one thread at a time. The serving
 thread of a session might change in some MySQL implementations.
-Therefore we do not have os_thread_get_curr_id() assertions in the code.
+Therefore we do not have pthread_self() assertions in the code.
 
 Normally, only the thread that is currently associated with a running
 transaction may access (read and modify) the trx object, and it may do
@@ -616,14 +619,20 @@ struct trx_t : ilist_node<>
 {
 private:
   /**
-    Count of references.
+    Least significant 31 bits is count of references.
 
     We can't release the locks nor commit the transaction until this reference
     is 0. We can change the state to TRX_STATE_COMMITTED_IN_MEMORY to signify
     that it is no longer "active".
-  */
 
-  Atomic_counter<int32_t> n_ref;
+    If the most significant bit is set this transaction should stop inheriting
+    (GAP)locks. Generally set to true during transaction prepare for RC or lower
+    isolation, if requested. Needed for replication replay where
+    we don't want to get blocked on GAP locks taken for protecting
+    concurrent unique insert or replace operation.
+  */
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE)
+  Atomic_relaxed<uint32_t> skip_lock_inheritance_and_n_ref;
 
 
 public:
@@ -633,6 +642,10 @@ public:
   Cleared in commit_in_memory() after commit_state(),
   trx_sys_t::deregister_rw(), release_locks(). */
   trx_id_t id;
+  /** The largest encountered transaction identifier for which no
+  transaction was observed to be active. This is a cache to speed up
+  trx_sys_t::find_same_or_older(). */
+  trx_id_t max_inactive_id;
 
 private:
   /** mutex protecting state and some of lock
@@ -640,7 +653,7 @@ private:
   srw_spin_mutex mutex;
 #ifdef UNIV_DEBUG
   /** The owner of mutex (0 if none); protected by mutex */
-  std::atomic<os_thread_id_t> mutex_owner{0};
+  std::atomic<pthread_t> mutex_owner{0};
 #endif /* UNIV_DEBUG */
 public:
   void mutex_init() { mutex.init(); }
@@ -651,14 +664,14 @@ public:
   {
     ut_ad(!mutex_is_owner());
     mutex.wr_lock();
-    ut_ad(!mutex_owner.exchange(os_thread_get_curr_id(),
+    ut_ad(!mutex_owner.exchange(pthread_self(),
                                 std::memory_order_relaxed));
   }
   /** Release the mutex */
   void mutex_unlock()
   {
     ut_ad(mutex_owner.exchange(0, std::memory_order_relaxed)
-	  == os_thread_get_curr_id());
+	  == pthread_self());
     mutex.wr_unlock();
   }
 #ifndef SUX_LOCK_GENERIC
@@ -669,7 +682,7 @@ public:
   bool mutex_is_owner() const
   {
     return mutex_owner.load(std::memory_order_relaxed) ==
-      os_thread_get_curr_id();
+      pthread_self();
   }
 #endif /* UNIV_DEBUG */
 
@@ -738,7 +751,7 @@ public:
 
   /** The locks of the transaction. Protected by lock_sys.latch
   (insertions also by trx_t::mutex). */
-  trx_lock_t lock;
+  alignas(CPU_LEVEL1_DCACHE_LINESIZE) trx_lock_t lock;
 
 #ifdef WITH_WSREP
   /** whether wsrep_on(mysql_thd) held at the start of transaction */
@@ -805,8 +818,12 @@ public:
 					flush the log in
 					trx_commit_complete_for_mysql() */
 	ulint		duplicates;	/*!< TRX_DUP_IGNORE | TRX_DUP_REPLACE */
-	bool		dict_operation;	/**< whether this modifies InnoDB
-					data dictionary */
+  /** whether this modifies InnoDB dictionary tables */
+  bool dict_operation;
+#ifdef UNIV_DEBUG
+  /** copy of dict_operation during commit() */
+  bool was_dict_operation;
+#endif
 	/** whether dict_sys.latch is held exclusively; protected by
 	dict_sys.latch */
 	bool dict_operation_lock_mode;
@@ -900,6 +917,10 @@ public:
 	bool		auto_commit;	/*!< true if it is an autocommit */
 	bool		will_lock;	/*!< set to inform trx_start_low() that
 					the transaction may acquire locks */
+	/* True if transaction has to read the undo log and
+	log the DML changes for online DDL table */
+	bool		apply_online_log = false;
+
 	/*------------------------------*/
 	fts_trx_t*	fts_trx;	/*!< FTS information, or NULL if
 					transaction hasn't modified tables
@@ -973,9 +994,12 @@ public:
   @retval false if the rollback was aborted by shutdown */
   inline bool rollback_finish();
 private:
+  /** Apply any changes to tables for which online DDL is in progress. */
+  ATTRIBUTE_COLD void apply_log();
   /** Process tables that were modified by the committing transaction. */
   inline void commit_tables();
-  /** Mark a transaction committed in the main memory data structures. */
+  /** Mark a transaction committed in the main memory data structures.
+  @param mtr  mini-transaction (if there are any persistent modifications) */
   inline void commit_in_memory(const mtr_t *mtr);
   /** Write log for committing the transaction. */
   void commit_persist();
@@ -1017,26 +1041,48 @@ public:
   void savepoints_discard(trx_named_savept_t *savept);
 
 
-  bool is_referenced() const { return n_ref > 0; }
+  bool is_referenced() const
+  {
+    return (skip_lock_inheritance_and_n_ref & ~(1U << 31)) > 0;
+  }
 
 
   void reference()
   {
-#ifdef UNIV_DEBUG
-    auto old_n_ref=
-#endif
-    n_ref++;
-    ut_ad(old_n_ref >= 0);
+    ut_d(auto old_n_ref =)
+    skip_lock_inheritance_and_n_ref.fetch_add(1);
+    ut_ad(int32_t(old_n_ref << 1) >= 0);
   }
-
 
   void release_reference()
   {
-#ifdef UNIV_DEBUG
-    auto old_n_ref=
+    ut_d(auto old_n_ref =)
+    skip_lock_inheritance_and_n_ref.fetch_sub(1);
+    ut_ad(int32_t(old_n_ref << 1) > 0);
+  }
+
+  bool is_not_inheriting_locks() const
+  {
+    return skip_lock_inheritance_and_n_ref >> 31;
+  }
+
+  void set_skip_lock_inheritance()
+  {
+    ut_d(auto old_n_ref=) skip_lock_inheritance_and_n_ref.fetch_add(1U << 31);
+    ut_ad(!(old_n_ref >> 31));
+  }
+
+  void reset_skip_lock_inheritance()
+  {
+#if defined __GNUC__ && (defined __i386__ || defined __x86_64__)
+    __asm__("lock btrl $31, %0" : : "m"(skip_lock_inheritance_and_n_ref));
+#elif defined _MSC_VER && (defined _M_IX86 || defined _M_X64)
+    _interlockedbittestandreset(
+        reinterpret_cast<volatile long *>(&skip_lock_inheritance_and_n_ref),
+        31);
+#else
+    skip_lock_inheritance_and_n_ref.fetch_and(~1U << 31);
 #endif
-    n_ref--;
-    ut_ad(old_n_ref > 0);
   }
 
   /** @return whether the table has lock on
@@ -1065,6 +1111,10 @@ public:
     ut_ad(!autoinc_locks || ib_vector_is_empty(autoinc_locks));
     ut_ad(UT_LIST_GET_LEN(lock.evicted_tables) == 0);
     ut_ad(!dict_operation);
+    ut_ad(!apply_online_log);
+    ut_ad(!is_not_inheriting_locks());
+    ut_ad(check_foreigns);
+    ut_ad(check_unique_secondary);
   }
 
   /** This has to be invoked on SAVEPOINT or at the end of a statement.
@@ -1124,18 +1174,13 @@ public:
   @return DB_SUCCESS or error code */
   dberr_t bulk_insert_apply()
   {
-    if (UNIV_LIKELY(!bulk_insert))
-      return DB_SUCCESS;
-    ut_ad(!check_unique_secondary);
-    ut_ad(!check_foreigns);
-    for (auto& t : mod_tables)
-      if (t.second.is_bulk_insert())
-        if (dberr_t err= t.second.write_bulk(t.first, this))
-          return err;
-    return DB_SUCCESS;
+    return UNIV_UNLIKELY(bulk_insert) ? bulk_insert_apply_low(): DB_SUCCESS;
   }
 
 private:
+  /** Apply the buffered bulk inserts. */
+  dberr_t bulk_insert_apply_low();
+
   /** Assign a rollback segment for modifying temporary tables.
   @return the assigned rollback segment */
   trx_rseg_t *assign_temp_rseg();
@@ -1207,6 +1252,6 @@ struct commit_node_t{
 };
 
 
-#include "trx0trx.ic"
+#include "trx0trx.inl"
 
 #endif

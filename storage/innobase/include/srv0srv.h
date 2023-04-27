@@ -3,7 +3,7 @@
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2022, MariaDB Corporation.
+Copyright (c) 2013, 2023, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -55,7 +55,7 @@ Created 10/10/1995 Heikki Tuuri
 /** Simple non-atomic counter
 @tparam	Type  the integer type of the counter */
 template <typename Type>
-struct MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) simple_counter
+struct alignas(CPU_LEVEL1_DCACHE_LINESIZE) simple_counter
 {
   /** Increment the counter */
   Type inc() { return add(1); }
@@ -85,20 +85,8 @@ struct srv_stats_t
 
 	/** Count the amount of data written in total (in bytes) */
 	ulint_ctr_1_t		data_written;
-
-	/** Store the number of write requests issued */
-	ulint_ctr_1_t		buf_pool_write_requests;
-
-	/** Number of buffer pool reads that led to the reading of
-	a disk page */
-	ulint_ctr_1_t		buf_pool_reads;
-
 	/** Number of bytes saved by page compression */
 	ulint_ctr_n_t          page_compression_saved;
-	/* Number of index pages written */
-	ulint_ctr_n_t          index_pages_written;
-	/* Number of non index pages written */
-	ulint_ctr_n_t          non_index_pages_written;
 	/* Number of pages compressed with page compression */
         ulint_ctr_n_t          pages_page_compressed;
 	/* Number of TRIM operations induced by page compression */
@@ -155,9 +143,6 @@ struct srv_stats_t
 
 	/** Number of encryption_get_latest_key_version calls */
 	ulint_ctr_n_t		n_key_requests;
-
-	/** Number of spaces in keyrotation list */
-	ulint_ctr_n_t		key_rotation_list_length;
 
 	/** Number of temporary tablespace blocks encrypted */
 	ulint_ctr_n_t		n_temp_blocks_encrypted;
@@ -279,19 +264,8 @@ extern uint	srv_flush_log_at_timeout;
 extern my_bool	srv_adaptive_flushing;
 extern my_bool	srv_flush_sync;
 
-#ifdef WITH_INNODB_DISALLOW_WRITES
-extern my_bool innodb_disallow_writes;
-void innodb_wait_allow_writes();
-#else
-# define innodb_wait_allow_writes() do {} while (0)
-#endif /* WITH_INNODB_DISALLOW_WRITES */
-
 /** Requested size in bytes */
 extern ulint		srv_buf_pool_size;
-/** Minimum pool size in bytes */
-extern const ulint	srv_buf_pool_min_size;
-/** Default pool size in bytes */
-extern const ulint	srv_buf_pool_def_size;
 /** Requested buffer pool chunk size */
 extern size_t		srv_buf_pool_chunk_unit;
 /** Scan depth for LRU flush batch i.e.: number of blocks scanned*/
@@ -315,8 +289,6 @@ extern ulint	srv_lock_table_size;
 
 /** the value of innodb_checksum_algorithm */
 extern ulong	srv_checksum_algorithm;
-
-extern uint	srv_n_file_io_threads;
 extern my_bool	srv_random_read_ahead;
 extern ulong	srv_read_ahead_threshold;
 extern uint	srv_n_read_io_threads;
@@ -391,6 +363,9 @@ extern my_bool  srv_immediate_scrub_data_uncompressed;
 enum srv_operation_mode {
 	/** Normal mode (MariaDB Server) */
 	SRV_OPERATION_NORMAL,
+	/** Mariabackup is executing server to export already restored
+	tablespaces */
+	SRV_OPERATION_EXPORT_RESTORED,
 	/** Mariabackup taking a backup */
 	SRV_OPERATION_BACKUP,
 	/** Mariabackup restoring a backup for subsequent --copy-back */
@@ -398,7 +373,10 @@ enum srv_operation_mode {
 	/** Mariabackup restoring the incremental part of a backup */
 	SRV_OPERATION_RESTORE_DELTA,
 	/** Mariabackup restoring a backup for subsequent --export */
-	SRV_OPERATION_RESTORE_EXPORT
+	SRV_OPERATION_RESTORE_EXPORT,
+	/** Mariabackup taking a backup and avoid deferring
+	any tablespace */
+	SRV_OPERATION_BACKUP_NO_DEFER
 };
 
 /** Current mode of operation */
@@ -438,8 +416,6 @@ extern bool	srv_log_file_created;
 #endif /* UNIV_DEBUG */
 
 extern ulint	srv_dml_needed_delay;
-
-#define SRV_MAX_N_IO_THREADS	130
 
 /** innodb_purge_threads; the number of purge tasks to use */
 extern uint srv_n_purge_threads;
@@ -671,24 +647,11 @@ struct export_var_t{
 	char  innodb_buffer_pool_resize_status[512];/*!< Buf pool resize status */
 	my_bool innodb_buffer_pool_load_incomplete;/*!< Buf pool load incomplete */
 	ulint innodb_buffer_pool_pages_total;	/*!< Buffer pool size */
-	ulint innodb_buffer_pool_pages_data;	/*!< Data pages */
 	ulint innodb_buffer_pool_bytes_data;	/*!< File bytes used */
-	ulint innodb_buffer_pool_pages_dirty;	/*!< Dirty data pages */
-	ulint innodb_buffer_pool_bytes_dirty;	/*!< File bytes modified */
 	ulint innodb_buffer_pool_pages_misc;	/*!< Miscellanous pages */
-	ulint innodb_buffer_pool_pages_free;	/*!< Free pages */
 #ifdef UNIV_DEBUG
 	ulint innodb_buffer_pool_pages_latched;	/*!< Latched pages */
 #endif /* UNIV_DEBUG */
-	ulint innodb_buffer_pool_pages_made_not_young;
-	ulint innodb_buffer_pool_pages_made_young;
-	ulint innodb_buffer_pool_pages_old;
-	ulint innodb_buffer_pool_read_requests;	/*!< buf_pool.stat.n_page_gets */
-	ulint innodb_buffer_pool_reads;		/*!< srv_buf_pool_reads */
-	ulint innodb_buffer_pool_write_requests;/*!< srv_stats.buf_pool_write_requests */
-	ulint innodb_buffer_pool_read_ahead_rnd;/*!< srv_read_ahead_rnd */
-	ulint innodb_buffer_pool_read_ahead;	/*!< srv_read_ahead */
-	ulint innodb_buffer_pool_read_ahead_evicted;/*!< srv_read_ahead evicted*/
 	ulint innodb_checkpoint_age;
 	ulint innodb_checkpoint_max_age;
 	ulint innodb_data_pending_reads;	/*!< Pending reads */
@@ -751,10 +714,6 @@ struct export_var_t{
 
 	int64_t innodb_page_compression_saved;/*!< Number of bytes saved
 						by page compression */
-	int64_t innodb_index_pages_written;  /*!< Number of index pages
-						written */
-	int64_t innodb_non_index_pages_written;  /*!< Number of non index pages
-						written */
 	int64_t innodb_pages_page_compressed;/*!< Number of pages
 						compressed by page compression */
 	int64_t innodb_page_compressed_trim_op;/*!< Number of TRIM operations
@@ -793,7 +752,6 @@ struct export_var_t{
 	ulint innodb_encryption_rotation_pages_flushed;
 	ulint innodb_encryption_rotation_estimated_iops;
 	int64_t innodb_encryption_key_requests;
-	int64_t innodb_key_rotation_list_length;
 };
 
 extern tpool::thread_pool *srv_thread_pool;

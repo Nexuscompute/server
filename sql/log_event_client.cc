@@ -17,6 +17,7 @@
 */
 
 
+#include "log_event.h"
 #ifndef MYSQL_CLIENT
 #error MYSQL_CLIENT must be defined here
 #endif
@@ -839,10 +840,12 @@ log_event_print_value(IO_CACHE *file, PRINT_EVENT_INFO *print_event_info,
     my_b_write_bit(file, ptr , (meta & 0xFF) * 8);
     return meta & 0xFF;
   
+  case MYSQL_TYPE_BLOB_COMPRESSED:
   case MYSQL_TYPE_BLOB:
     switch (meta) {
     case 1:
-      strmake(typestr, "TINYBLOB/TINYTEXT", typestr_length);
+      my_snprintf(typestr, typestr_length, "TINYBLOB/TINYTEXT%s",
+          type == MYSQL_TYPE_BLOB_COMPRESSED ? " COMPRESSED" : "");
       if (!ptr)
         goto return_null;
 
@@ -850,7 +853,8 @@ log_event_print_value(IO_CACHE *file, PRINT_EVENT_INFO *print_event_info,
       my_b_write_quoted(file, ptr + 1, length);
       return length + 1;
     case 2:
-      strmake(typestr, "BLOB/TEXT", typestr_length);
+      my_snprintf(typestr, typestr_length, "BLOB/TEXT%s",
+          type == MYSQL_TYPE_BLOB_COMPRESSED ? " COMPRESSED" : "");
       if (!ptr)
         goto return_null;
 
@@ -858,7 +862,8 @@ log_event_print_value(IO_CACHE *file, PRINT_EVENT_INFO *print_event_info,
       my_b_write_quoted(file, ptr + 2, length);
       return length + 2;
     case 3:
-      strmake(typestr, "MEDIUMBLOB/MEDIUMTEXT", typestr_length);
+      my_snprintf(typestr, typestr_length, "MEDIUMBLOB/MEDIUMTEXT%s",
+          type == MYSQL_TYPE_BLOB_COMPRESSED ? " COMPRESSED" : "");
       if (!ptr)
         goto return_null;
 
@@ -866,7 +871,8 @@ log_event_print_value(IO_CACHE *file, PRINT_EVENT_INFO *print_event_info,
       my_b_write_quoted(file, ptr + 3, length);
       return length + 3;
     case 4:
-      strmake(typestr, "LONGBLOB/LONGTEXT", typestr_length);
+      my_snprintf(typestr, typestr_length, "LONGBLOB/LONGTEXT%s",
+          type == MYSQL_TYPE_BLOB_COMPRESSED ? " COMPRESSED" : "");
       if (!ptr)
         goto return_null;
 
@@ -878,10 +884,12 @@ log_event_print_value(IO_CACHE *file, PRINT_EVENT_INFO *print_event_info,
       return 0;
     }
 
+  case MYSQL_TYPE_VARCHAR_COMPRESSED:
   case MYSQL_TYPE_VARCHAR:
   case MYSQL_TYPE_VAR_STRING:
     length= meta;
-    my_snprintf(typestr, typestr_length, "VARSTRING(%d)", length);
+    my_snprintf(typestr, typestr_length, "VARSTRING(%d)%s", length,
+          type == MYSQL_TYPE_VARCHAR_COMPRESSED ? " COMPRESSED" : "");
     if (!ptr)
       goto return_null;
 
@@ -1886,6 +1894,7 @@ bool Query_log_event::print_query_header(IO_CACHE* file,
     if (unlikely(tmp)) /* some bits have changed */
     {
       bool need_comma= 0;
+      ulonglong mask= glob_description_event->options_written_to_bin_log;
       if (my_b_write_string(file, "SET ") ||
           print_set_option(file, tmp, OPTION_NO_FOREIGN_KEY_CHECKS, ~flags2,
                            "@@session.foreign_key_checks", &need_comma)||
@@ -1895,11 +1904,13 @@ bool Query_log_event::print_query_header(IO_CACHE* file,
                            "@@session.unique_checks", &need_comma) ||
           print_set_option(file, tmp, OPTION_NOT_AUTOCOMMIT, ~flags2,
                            "@@session.autocommit", &need_comma) ||
-          print_set_option(file, tmp, OPTION_NO_CHECK_CONSTRAINT_CHECKS,
-                           ~flags2,
+          print_set_option(file, tmp, OPTION_NO_CHECK_CONSTRAINT_CHECKS, ~flags2,
                            "@@session.check_constraint_checks", &need_comma) ||
-          print_set_option(file, tmp, OPTION_IF_EXISTS, flags2,
-                           "@@session.sql_if_exists", &need_comma)||
+          print_set_option(file, tmp, mask & OPTION_IF_EXISTS, flags2,
+                           "@@session.sql_if_exists", &need_comma) ||
+          print_set_option(file, tmp, mask & OPTION_EXPLICIT_DEF_TIMESTAMP, flags2,
+                           "@@session.explicit_defaults_for_timestamp",
+                           &need_comma) ||
           my_b_printf(file,"%s\n", print_event_info->delimiter))
         goto err;
       print_event_info->flags2= flags2;
@@ -1956,11 +1967,11 @@ bool Query_log_event::print_query_header(IO_CACHE* file,
         goto err;
     }
     if (my_b_printf(file,"SET "
-                    "@@session.character_set_client=%d,"
+                    "@@session.character_set_client=%s,"
                     "@@session.collation_connection=%d,"
                     "@@session.collation_server=%d"
                     "%s\n",
-                    uint2korr(charset),
+                    cs_info->cs_name.str,
                     uint2korr(charset+2),
                     uint2korr(charset+4),
                     print_event_info->delimiter))
@@ -2005,6 +2016,19 @@ err:
   return 1;
 }
 
+bool Query_log_event::print_verbose(IO_CACHE* cache, PRINT_EVENT_INFO* print_event_info)
+{
+  if (my_b_printf(cache, "### ") ||
+      my_b_write(cache, (uchar *) query, q_len) ||
+      my_b_printf(cache, "\n"))
+  {
+    goto err;
+  }
+  return 0;
+
+err:
+  return 1;
+}
 
 bool Query_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
 {
@@ -2020,9 +2044,42 @@ bool Query_log_event::print(FILE* file, PRINT_EVENT_INFO* print_event_info)
     goto err;
   if (!is_flashback)
   {
-    if (my_b_write(&cache, (uchar*) query, q_len) ||
-        my_b_printf(&cache, "\n%s\n", print_event_info->delimiter))
-      goto err;
+    if (gtid_flags_extra & (Gtid_log_event::FL_START_ALTER_E1 |
+                            Gtid_log_event::FL_COMMIT_ALTER_E1 |
+                            Gtid_log_event::FL_ROLLBACK_ALTER_E1))
+    {
+      bool do_print_encoded=
+        print_event_info->base64_output_mode != BASE64_OUTPUT_NEVER &&
+        print_event_info->base64_output_mode != BASE64_OUTPUT_DECODE_ROWS &&
+        !print_event_info->short_form;
+      bool comment_mode= do_print_encoded &&
+        gtid_flags_extra & (Gtid_log_event::FL_START_ALTER_E1 |
+                            Gtid_log_event::FL_ROLLBACK_ALTER_E1);
+
+      if(comment_mode)
+        my_b_printf(&cache, "/*!100600 ");
+      if (do_print_encoded)
+        my_b_printf(&cache, "BINLOG '\n");
+      if (print_base64(&cache, print_event_info, do_print_encoded))
+        goto err;
+      if (do_print_encoded)
+      {
+        if(comment_mode)
+           my_b_printf(&cache, "' */%s\n", print_event_info->delimiter);
+        else
+           my_b_printf(&cache, "'%s\n", print_event_info->delimiter);
+      }
+      if (print_event_info->verbose && print_verbose(&cache, print_event_info))
+      {
+        goto err;
+      }
+    }
+    else
+    {
+      if (my_b_write(&cache, (uchar*) query, q_len) ||
+          my_b_printf(&cache, "\n%s\n", print_event_info->delimiter))
+        goto err;
+    }
   }
   else // is_flashback == 1
   {
@@ -2294,6 +2351,8 @@ Gtid_list_log_event::print(FILE *file, PRINT_EVENT_INFO *print_event_info)
                                Write_on_release_cache::FLUSH_F);
   char buf[21];
   uint32 i;
+
+  qsort(list, count, sizeof(rpl_gtid), compare_glle_gtids);
 
   if (print_header(&cache, print_event_info, FALSE) ||
       my_b_printf(&cache, "\tGtid list ["))
@@ -3791,6 +3850,8 @@ st_print_event_info::st_print_event_info()
   printed_fd_event=FALSE;
   file= 0;
   base64_output_mode=BASE64_OUTPUT_UNSPEC;
+  m_is_event_group_active= TRUE;
+  m_is_event_group_filtering_enabled= FALSE;
   open_cached_file(&head_cache, NULL, NULL, 0, flags);
   open_cached_file(&body_cache, NULL, NULL, 0, flags);
   open_cached_file(&tail_cache, NULL, NULL, 0, flags);
@@ -3853,6 +3914,15 @@ Gtid_log_event::print(FILE *file, PRINT_EVENT_INFO *print_event_info)
         goto err;
     if (flags2 & FL_WAITED)
       if (my_b_write_string(&cache, " waited"))
+        goto err;
+    if (flags_extra & FL_START_ALTER_E1)
+      if (my_b_write_string(&cache, " START ALTER"))
+        goto err;
+    if (flags_extra & FL_COMMIT_ALTER_E1)
+      if (my_b_printf(&cache, " COMMIT ALTER id= %lu", sa_seq_no))
+        goto err;
+    if (flags_extra & FL_ROLLBACK_ALTER_E1)
+      if (my_b_printf(&cache, " ROLLBACK ALTER id= %lu", sa_seq_no))
         goto err;
     if (my_b_printf(&cache, "\n"))
       goto err;

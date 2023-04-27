@@ -1,4 +1,4 @@
-/* Copyright (c) 2015, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2015, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -35,6 +35,11 @@
 
 THR_LOCK table_status_by_thread::m_table_lock;
 
+PFS_engine_table_share_state
+table_status_by_thread::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_status_by_thread::m_share=
 {
@@ -50,7 +55,9 @@ table_status_by_thread::m_share=
   "THREAD_ID BIGINT unsigned not null comment 'The thread identifier of the session in which the status variable is defined.',"
   "VARIABLE_NAME VARCHAR(64) not null comment 'Status variable name.',"
   "VARIABLE_VALUE VARCHAR(1024) comment 'Aggregated status variable value.' )") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -61,7 +68,7 @@ table_status_by_thread::create(void)
 
 int table_status_by_thread::delete_all_rows(void)
 {
-  /* Lock required to aggregate to global_status_vars. */
+  /* Lock required to aggregate to global_status_var. */
   mysql_mutex_lock(&LOCK_status);
 
   reset_status_by_thread();
@@ -157,7 +164,7 @@ table_status_by_thread::rnd_pos(const void *pos)
     return HA_ERR_RECORD_DELETED;
 
   set_position(pos);
-  DBUG_ASSERT(m_pos.m_index_1 < global_thread_container.get_row_count());
+  assert(m_pos.m_index_1 < global_thread_container.get_row_count());
 
   PFS_thread *pfs_thread= global_thread_container.get(m_pos.m_index_1);
   /*
@@ -210,7 +217,7 @@ int table_status_by_thread
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)
@@ -229,7 +236,7 @@ int table_status_by_thread
         m_row.m_variable_value.set_field(f);
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

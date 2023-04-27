@@ -60,7 +60,7 @@ ROLLBACK/*!*/;
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=1411383296/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C latin1 *//*!*/;
@@ -422,7 +422,7 @@ COMMIT
 use `test`/*!*/;
 SET TIMESTAMP=1000000000/*!*/;
 SET @@session.pseudo_thread_id=#/*!*/;
-SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0/*!*/;
+SET @@session.foreign_key_checks=1, @@session.sql_auto_is_null=0, @@session.unique_checks=1, @@session.autocommit=1, @@session.check_constraint_checks=1, @@session.sql_if_exists=0, @@session.explicit_defaults_for_timestamp=0/*!*/;
 SET @@session.sql_mode=1411383296/*!*/;
 SET @@session.auto_increment_increment=1, @@session.auto_increment_offset=1/*!*/;
 /*!\C latin1 *//*!*/;
@@ -702,6 +702,10 @@ include/assert.inc [Table t1 should have 0 rows.]
 # 6- Rows must be present upon restoring from flashback
 include/assert.inc [Table t1 should have six rows.]
 DROP TABLE t1;
+#
+# MDEV-30698 Cover missing test cases for mariadb-binlog options
+#            --raw [and] --flashback
+#
 SET binlog_format=statement;
 Warnings:
 Warning	1105	MariaDB Galera and flashback do not support binlog format: STATEMENT

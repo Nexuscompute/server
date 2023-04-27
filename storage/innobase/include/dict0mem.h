@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2021, MariaDB Corporation.
+Copyright (c) 2013, 2023, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -396,18 +396,7 @@ dict_mem_index_create(
 	ulint		type,		/*!< in: DICT_UNIQUE,
 					DICT_CLUSTERED, ... ORed */
 	ulint		n_fields);	/*!< in: number of fields */
-/**********************************************************************//**
-Adds a field definition to an index. NOTE: does not take a copy
-of the column name if the field is a column. The memory occupied
-by the column name may be released only after publishing the index. */
-void
-dict_mem_index_add_field(
-/*=====================*/
-	dict_index_t*	index,		/*!< in: index */
-	const char*	name,		/*!< in: column name */
-	ulint		prefix_len);	/*!< in: 0 or the column prefix length
-					in a MySQL index like
-					INDEX (textcol(25)) */
+
 /**********************************************************************//**
 Frees an index memory object. */
 void
@@ -886,9 +875,11 @@ struct dict_field_t{
 	unsigned	fixed_len:10;	/*!< 0 or the fixed length of the
 					column if smaller than
 					DICT_ANTELOPE_MAX_INDEX_COL_LEN */
+	/** 1=DESC, 0=ASC */
+	unsigned	descending:1;
 
 	/** Zero-initialize all fields */
-	dict_field_t() : col(NULL), name(NULL), prefix_len(0), fixed_len(0) {}
+	dict_field_t() { memset((void*) this, 0, sizeof *this); }
 
 	/** Check whether two index fields are equivalent.
 	@param[in]	old	the other index field
@@ -966,6 +957,26 @@ const char innobase_index_reserve_name[] = "GEN_CLUST_INDEX";
 /** Data structure for an index.  Most fields will be
 initialized to 0, NULL or FALSE in dict_mem_index_create(). */
 struct dict_index_t {
+  /** Columns whose character-set collation is being changed */
+  struct col_info
+  {
+    /** number of columns whose charset-collation is being changed */
+    unsigned n_cols;
+    /** columns with changed charset-collation */
+    dict_col_t *cols;
+
+    /** Add a column with changed collation. */
+    dict_col_t *add(mem_heap_t *heap, const dict_col_t &col, unsigned offset)
+    {
+      ut_ad(offset < n_cols);
+      if (!cols)
+        cols= static_cast<dict_col_t*>
+          (mem_heap_alloc(heap, n_cols * sizeof col));
+      new (&cols[offset]) dict_col_t(col);
+      return &cols[offset];
+    }
+  };
+
   /** Maximum number of fields */
   static constexpr unsigned MAX_N_FIELDS= (1U << 10) - 1;
 
@@ -1051,6 +1062,16 @@ struct dict_index_t {
 	It should use heap from dict_index_t. It should be freed
 	while removing the index from table. */
 	dict_add_v_col_info* new_vcol_info;
+
+	/** During ALTER TABLE, columns that a being-added index depends on
+	and whose encoding or collation is being changed to something
+	that is compatible with the clustered index.
+	Allocated from dict_index_t::heap.
+
+	@see rollback_inplace_alter_table()
+	@see ha_innobase_inplace_ctx::col_collations */
+	col_info* change_col_info;
+
 	UT_LIST_NODE_T(dict_index_t)
 			indexes;/*!< list of indexes of the table */
 #ifdef BTR_CUR_ADAPT
@@ -1145,6 +1166,7 @@ public:
 	{
 		ut_ad(!to_be_dropped);
 		ut_ad(committed || !(type & DICT_CLUSTERED));
+		ut_ad(!committed || !change_col_info);
 		uncommitted = !committed;
 	}
 
@@ -1183,6 +1205,9 @@ public:
 
 	/** @return whether this is the change buffer */
 	bool is_ibuf() const { return UNIV_UNLIKELY(type & DICT_IBUF); }
+
+	/** @return whether this index requires locking */
+	bool has_locking() const { return !is_ibuf(); }
 
 	/** @return whether this is a normal B-tree index
         (not the change buffer, not SPATIAL or FULLTEXT) */
@@ -1307,8 +1332,19 @@ public:
   ulint get_new_n_vcol() const
   { return new_vcol_info ? new_vcol_info->n_v_col : 0; }
 
-  /** Reconstruct the clustered index fields. */
-  inline void reconstruct_fields();
+  /** Assign the number of collation change fields as a part of the index
+  @param  n_cols   number of columns whose collation is changing */
+  void init_change_cols(unsigned n_cols)
+  {
+    ut_ad(n_fields > n_cols || type & DICT_FTS);
+    change_col_info= static_cast<col_info*>
+      (mem_heap_zalloc(heap, sizeof(col_info)));
+    change_col_info->n_cols= n_cols;
+  }
+
+  /** Reconstruct the clustered index fields.
+  @return whether metadata is incorrect */
+  inline bool reconstruct_fields();
 
   /** Check if the index contains a column or a prefix of that column.
   @param[in]	n		column number
@@ -1403,8 +1439,23 @@ public:
 
   /** Clear the index tree and reinitialize the root page, in the
   rollback of TRX_UNDO_EMPTY. The BTR_SEG_LEAF is freed and reinitialized.
-  @param thr query thread */
-  void clear(que_thr_t *thr);
+  @param thr query thread
+  @return error code */
+  dberr_t clear(que_thr_t *thr);
+
+  /** Check whether the online log is dummy value to indicate
+  whether table undergoes active DDL.
+  @retval true if online log is dummy value */
+  bool online_log_is_dummy() const
+  {
+    return online_log == reinterpret_cast<const row_log_t*>(this);
+  }
+
+  /** Assign clustered index online log to dummy value */
+  void online_log_make_dummy()
+  {
+    online_log= reinterpret_cast<row_log_t*>(this);
+  }
 };
 
 /** Detach a virtual column from an index.
@@ -1413,6 +1464,21 @@ inline void dict_col_t::detach(const dict_index_t &index)
 {
   if (is_virtual())
     reinterpret_cast<dict_v_col_t*>(this)->detach(index);
+}
+
+/** Add a field definition to an index.
+@param index         index
+@param name          pointer to column name
+@param prefix_len    column prefix length, or 0
+@param descending    whether to use descending order */
+inline void dict_mem_index_add_field(dict_index_t *index, const char *name,
+                                     ulint prefix_len, bool descending= false)
+{
+  ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
+  dict_field_t &field= index->fields[index->n_def++];
+  field.name= name;
+  field.prefix_len= prefix_len & ((1U << 12) - 1);
+  field.descending= descending;
 }
 
 /** The status of online index creation */
@@ -1940,28 +2006,29 @@ struct dict_table_t {
 	/** For overflow fields returns potential max length stored inline */
 	inline size_t get_overflow_field_local_len() const;
 
-	/** Parse the table file name into table name and database name.
-	@tparam		dict_locked	whether dict_sys.lock() was called
-	@param[in,out]	db_name		database name buffer
-	@param[in,out]	tbl_name	table name buffer
-	@param[out]	db_name_len	database name length
-	@param[out]	tbl_name_len	table name length
-	@return whether the table name is visible to SQL */
-	template<bool dict_locked= false>
-	bool parse_name(char (&db_name)[NAME_LEN + 1],
-			char (&tbl_name)[NAME_LEN + 1],
-			size_t *db_name_len, size_t *tbl_name_len) const;
+  /** Parse the table file name into table name and database name.
+  @tparam        dict_frozen  whether the caller holds dict_sys.latch
+  @param[in,out] db_name      database name buffer
+  @param[in,out] tbl_name     table name buffer
+  @param[out] db_name_len     database name length
+  @param[out] tbl_name_len    table name length
+  @return whether the table name is visible to SQL */
+  template<bool dict_frozen= false>
+  bool parse_name(char (&db_name)[NAME_LEN + 1],
+                  char (&tbl_name)[NAME_LEN + 1],
+                  size_t *db_name_len, size_t *tbl_name_len) const;
 
-  /** Clear the table when rolling back TRX_UNDO_EMPTY */
-  void clear(que_thr_t *thr);
+  /** Clear the table when rolling back TRX_UNDO_EMPTY
+  @return error code */
+  dberr_t clear(que_thr_t *thr);
 
 #ifdef UNIV_DEBUG
   /** @return whether the current thread holds the lock_mutex */
   bool lock_mutex_is_owner() const
-  { return lock_mutex_owner == os_thread_get_curr_id(); }
+  { return lock_mutex_owner == pthread_self(); }
   /** @return whether the current thread holds the stats_mutex (lock_mutex) */
   bool stats_mutex_is_owner() const
-  { return lock_mutex_owner == os_thread_get_curr_id(); }
+  { return lock_mutex_owner == pthread_self(); }
 #endif /* UNIV_DEBUG */
   void lock_mutex_init() { lock_mutex.init(); }
   void lock_mutex_destroy() { lock_mutex.destroy(); }
@@ -1970,20 +2037,20 @@ struct dict_table_t {
   {
     ut_ad(!lock_mutex_is_owner());
     lock_mutex.wr_lock();
-    ut_ad(!lock_mutex_owner.exchange(os_thread_get_curr_id()));
+    ut_ad(!lock_mutex_owner.exchange(pthread_self()));
   }
   /** Try to acquire lock_mutex */
   bool lock_mutex_trylock()
   {
     ut_ad(!lock_mutex_is_owner());
     bool acquired= lock_mutex.wr_lock_try();
-    ut_ad(!acquired || !lock_mutex_owner.exchange(os_thread_get_curr_id()));
+    ut_ad(!acquired || !lock_mutex_owner.exchange(pthread_self()));
     return acquired;
   }
   /** Release lock_mutex */
   void lock_mutex_unlock()
   {
-    ut_ad(lock_mutex_owner.exchange(0) == os_thread_get_curr_id());
+    ut_ad(lock_mutex_owner.exchange(0) == pthread_self());
     lock_mutex.wr_unlock();
   }
 #ifndef SUX_LOCK_GENERIC
@@ -2004,7 +2071,7 @@ struct dict_table_t {
   @param new_name     name of the table
   @param replace      whether to replace the file with the new name
                       (as part of rolling back TRUNCATE) */
-  dberr_t rename_tablespace(const char *new_name, bool replace) const;
+  dberr_t rename_tablespace(span<const char> new_name, bool replace) const;
 
 private:
 	/** Initialize instant->field_map.
@@ -2285,7 +2352,7 @@ private:
   srw_spin_mutex lock_mutex;
 #ifdef UNIV_DEBUG
   /** The owner of lock_mutex (0 if none) */
-  Atomic_relaxed<os_thread_id_t> lock_mutex_owner{0};
+  Atomic_relaxed<pthread_t> lock_mutex_owner{0};
 #endif
 public:
   /** Autoinc counter value to give to the next inserted row. */
@@ -2366,9 +2433,18 @@ public:
     return false;
   }
 
+  /** @return whether a DDL operation is in progress on this table */
+  bool is_active_ddl() const
+  {
+    return UT_LIST_GET_FIRST(indexes)->online_log;
+  }
+
   /** @return whether the name is
   mysql.innodb_index_stats or mysql.innodb_table_stats */
   bool is_stats_table() const;
+
+  /** @return number of unique columns in FTS_DOC_ID index */
+  unsigned fts_n_uniq() const { return versioned() ? 2 : 1; }
 
   /** Create metadata.
   @param name     table name
@@ -2381,6 +2457,16 @@ public:
   static dict_table_t *create(const span<const char> &name, fil_space_t *space,
                               ulint n_cols, ulint n_v_cols, ulint flags,
                               ulint flags2);
+
+  /** Check whether the table has any spatial indexes */
+  bool has_spatial_index() const
+  {
+    for (auto i= UT_LIST_GET_FIRST(indexes);
+         (i= UT_LIST_GET_NEXT(indexes, i)) != nullptr; )
+      if (i->is_spatial())
+        return true;
+    return false;
+  }
 };
 
 inline void dict_index_t::set_modified(mtr_t& mtr) const
@@ -2556,6 +2642,6 @@ inline void dict_stats_empty_defrag_stats(dict_index_t* index)
 	index->stat_defrag_n_page_split = 0;
 }
 
-#include "dict0mem.ic"
+#include "dict0mem.inl"
 
 #endif /* dict0mem_h */

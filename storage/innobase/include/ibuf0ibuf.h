@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2021, MariaDB Corporation.
+Copyright (c) 2016, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -30,7 +30,6 @@ Created 7/19/1997 Heikki Tuuri
 #include "mtr0mtr.h"
 #include "dict0mem.h"
 #include "fsp0fsp.h"
-#include "ibuf0types.h"
 
 /** Default value for maximum on-disk size of change buffer in terms
 of percentage of the buffer pool. */
@@ -60,6 +59,37 @@ enum ibuf_use_t {
 
 /** Operations that can currently be buffered. */
 extern ulong		innodb_change_buffering;
+
+/** Insert buffer struct */
+struct ibuf_t{
+	Atomic_relaxed<ulint> size;	/*!< current size of the ibuf index
+					tree, in pages */
+	Atomic_relaxed<ulint> max_size;	/*!< recommended maximum size of the
+					ibuf index tree, in pages */
+	ulint		seg_size;	/*!< allocated pages of the file
+					segment containing ibuf header and
+					tree */
+	bool		empty;		/*!< Protected by the page
+					latch of the root page of the
+					insert buffer tree
+					(FSP_IBUF_TREE_ROOT_PAGE_NO). true
+					if and only if the insert
+					buffer tree is empty. */
+	ulint		free_list_len;	/*!< length of the free list */
+	ulint		height;		/*!< tree height */
+	dict_index_t*	index;		/*!< insert buffer index */
+
+	/** number of pages merged */
+	Atomic_counter<ulint> n_merges;
+	Atomic_counter<ulint> n_merged_ops[IBUF_OP_COUNT];
+					/*!< number of operations of each type
+					merged to index pages */
+	Atomic_counter<ulint> n_discarded_ops[IBUF_OP_COUNT];
+					/*!< number of operations of each type
+					discarded without merging due to the
+					tablespace being deleted or the
+					index being dropped */
+};
 
 /** The insert buffer control structure */
 extern ibuf_t		ibuf;
@@ -264,7 +294,6 @@ ibuf_page_low(
 	MY_ATTRIBUTE((warn_unused_result));
 
 #ifdef UNIV_DEBUG
-
 /** Checks if a page is a level 2 or 3 page in the ibuf hierarchy of pages.
 Must not be called when recv_no_ibuf_operations==true.
 @param[in]	page_id		tablespace/page identifier
@@ -274,7 +303,7 @@ Must not be called when recv_no_ibuf_operations==true.
 # define ibuf_page(page_id, zip_size, mtr)	\
 	ibuf_page_low(page_id, zip_size, true, mtr)
 
-#else /* UVIV_DEBUG */
+#else /* UNIV_DEBUG */
 
 /** Checks if a page is a level 2 or 3 page in the ibuf hierarchy of pages.
 Must not be called when recv_no_ibuf_operations==true.
@@ -285,7 +314,7 @@ Must not be called when recv_no_ibuf_operations==true.
 # define ibuf_page(page_id, zip_size, mtr)	\
 	ibuf_page_low(page_id, zip_size, mtr)
 
-#endif /* UVIV_DEBUG */
+#endif /* UNIV_DEBUG */
 /***********************************************************************//**
 Frees excess pages from the ibuf free list. This function is called when an OS
 thread calls fsp services to allocate a new file segment, or a new page to a
@@ -327,20 +356,22 @@ exist entries for such a page if the page belonged to an index which
 subsequently was dropped.
 @param block    X-latched page to try to apply changes to, or NULL to discard
 @param page_id  page identifier
-@param zip_size ROW_FORMAT=COMPRESSED page size, or 0 */
-void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t page_id,
-                                   ulint zip_size);
+@param zip_size ROW_FORMAT=COMPRESSED page size, or 0
+@return error code */
+dberr_t ibuf_merge_or_delete_for_page(buf_block_t *block,
+                                      const page_id_t page_id,
+                                      ulint zip_size);
 
 /** Delete all change buffer entries for a tablespace,
-in DISCARD TABLESPACE, IMPORT TABLESPACE, or crash recovery.
+in DISCARD TABLESPACE, IMPORT TABLESPACE, or read-ahead.
 @param[in]	space		missing or to-be-discarded tablespace */
 void ibuf_delete_for_discarded_space(uint32_t space);
 
 /** Contract the change buffer by reading pages to the buffer pool.
 @return a lower limit for the combined size in bytes of entries which
-will be merged from ibuf trees to the pages read, 0 if ibuf is
-empty */
-ulint ibuf_merge_all();
+will be merged from ibuf trees to the pages read
+@retval 0 if ibuf.empty */
+ulint ibuf_contract();
 
 /** Contracts insert buffer trees by reading pages referring to space_id
 to the buffer pool.
@@ -383,13 +414,11 @@ ibuf_close(void);
 dberr_t ibuf_check_bitmap_on_import(const trx_t* trx, fil_space_t* space)
 	MY_ATTRIBUTE((nonnull, warn_unused_result));
 
-/** Updates free bits and buffered bits for bulk loaded page.
-@param[in]      block   index page
-@param]in]      reset   flag if reset free val */
-void
-ibuf_set_bitmap_for_bulk_load(
-	buf_block_t*    block,
-	bool		reset);
+/** Update free bits and buffered bits for bulk loaded page.
+@param block   secondary index leaf page
+@param mtr     mini-transaction
+@param reset   whether the page is full */
+void ibuf_set_bitmap_for_bulk_load(buf_block_t *block, mtr_t *mtr, bool reset);
 
 #define IBUF_HEADER_PAGE_NO	FSP_IBUF_HEADER_PAGE_NO
 #define IBUF_TREE_ROOT_PAGE_NO	FSP_IBUF_TREE_ROOT_PAGE_NO
@@ -402,6 +431,6 @@ for the file segment from which the pages for the ibuf tree are allocated */
 /* The insert buffer tree itself is always located in space 0. */
 #define IBUF_SPACE_ID		static_cast<ulint>(0)
 
-#include "ibuf0ibuf.ic"
+#include "ibuf0ibuf.inl"
 
 #endif

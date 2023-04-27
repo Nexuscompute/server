@@ -2,6 +2,7 @@
 #define WOLFSSL_USER_SETTINGS_H
 
 #define HAVE_CRL
+#define WOLFSSL_HAVE_ERROR_QUEUE
 #define WOLFSSL_MYSQL_COMPATIBLE
 #define HAVE_ECC
 #define ECC_TIMING_RESISTANT
@@ -46,6 +47,7 @@
   WolfSSL will use more stack space with it, with fastmath
 */
 #cmakedefine FP_MAX_BITS 16384
+#define RSA_MAX_SIZE 8192
 #cmakedefine WOLFSSL_AESNI
 #cmakedefine USE_FAST_MATH
 #cmakedefine TFM_TIMING_RESISTANT
@@ -54,5 +56,6 @@
 #cmakedefine USE_INTEL_SPEEDUP
 #cmakedefine USE_FAST_MATH
 #cmakedefine WOLFSSL_X86_64_BUILD
+#cmakedefine WOLFSSL_SP_MATH_ALL
 
 #endif  /* WOLFSSL_USER_SETTINGS_H */

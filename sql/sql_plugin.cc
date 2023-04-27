@@ -40,6 +40,7 @@
 #include <mysql/plugin_data_type.h>
 #include <mysql/plugin_function.h>
 #include "sql_plugin_compat.h"
+#include "wsrep_mysqld.h"
 
 static PSI_memory_key key_memory_plugin_mem_root;
 static PSI_memory_key key_memory_plugin_int_mem_root;
@@ -233,7 +234,7 @@ static struct
 
 /* support for Services */
 
-#include "sql_plugin_services.ic"
+#include "sql_plugin_services.inl"
 
 /*
   A mutex LOCK_plugin must be acquired before accessing the
@@ -311,7 +312,8 @@ public:
   struct st_mysql_sys_var *plugin_var;
 
   sys_var_pluginvar(sys_var_chain *chain, const char *name_arg,
-                    st_plugin_int *p, st_mysql_sys_var *plugin_var_arg);
+                    st_plugin_int *p, st_mysql_sys_var *plugin_var_arg,
+                    const char *substitute);
   sys_var_pluginvar *cast_pluginvar() { return this; }
   uchar* real_value_ptr(THD *thd, enum_var_type type) const;
   TYPELIB* plugin_var_typelib(void) const;
@@ -340,7 +342,7 @@ static bool register_builtin(struct st_maria_plugin *, struct st_plugin_int *,
                              struct st_plugin_int **);
 static void unlock_variables(THD *thd, struct system_variables *vars);
 static void cleanup_variables(struct system_variables *vars);
-static void plugin_vars_free_values(sys_var *vars);
+static void plugin_vars_free_values(st_mysql_sys_var **vars);
 static void restore_ptr_backup(uint n, st_ptr_backup *backup);
 static void intern_plugin_unlock(LEX *lex, plugin_ref plugin);
 static void reap_plugins(void);
@@ -373,7 +375,8 @@ bool check_valid_path(const char *path, size_t len)
 static void fix_dl_name(MEM_ROOT *root, LEX_CSTRING *dl)
 {
   const size_t so_ext_len= sizeof(SO_EXT) - 1;
-  if (my_strcasecmp(&my_charset_latin1, dl->str + dl->length - so_ext_len,
+  if (dl->length < so_ext_len ||
+      my_strcasecmp(&my_charset_latin1, dl->str + dl->length - so_ext_len,
                     SO_EXT))
   {
     char *s= (char*)alloc_root(root, dl->length + so_ext_len + 1);
@@ -1290,7 +1293,7 @@ static void plugin_del(struct st_plugin_int *plugin, uint del_mask)
   if (!(plugin->state & del_mask))
     DBUG_VOID_RETURN;
   /* Free allocated strings before deleting the plugin. */
-  plugin_vars_free_values(plugin->system_vars);
+  plugin_vars_free_values(plugin->plugin->system_vars);
   restore_ptr_backup(plugin->nbackups, plugin->ptr_backup);
   if (plugin->plugin_dl)
   {
@@ -2530,7 +2533,7 @@ static bool plugin_dl_foreach_internal(THD *thd, st_plugin_dl *plugin_dl,
     tmp.plugin_dl= plugin_dl;
 
     mysql_mutex_lock(&LOCK_plugin);
-    if ((plugin= plugin_find_internal(&tmp.name, MYSQL_ANY_PLUGIN)) &&
+    if ((plugin= plugin_find_internal(&tmp.name, plug->type)) &&
         plugin->plugin == plug)
 
     {
@@ -2942,6 +2945,7 @@ sys_var *find_sys_var(THD *thd, const char *str, size_t length,
 /*
   called by register_var, construct_options and test_plugin_options.
   Returns the 'bookmark' for the named variable.
+  returns null for non thd-local variables.
   LOCK_system_variables_hash should be at least read locked
 */
 static st_bookmark *find_bookmark(const char *plugin, const char *name,
@@ -2998,7 +3002,6 @@ static size_t var_storage_size(int flags)
 
 /*
   returns a bookmark for thd-local variables, creating if neccessary.
-  returns null for non thd-local variables.
   Requires that a write lock is obtained on LOCK_system_variables_hash
 */
 static st_bookmark *register_var(const char *plugin, const char *name,
@@ -3352,27 +3355,35 @@ void plugin_thdvar_cleanup(THD *thd)
   variables are no longer accessible and the value space is lost. Note
   that only string values with PLUGIN_VAR_MEMALLOC are allocated and
   must be freed.
-
-  @param[in]        vars        Chain of system variables of a plugin
 */
 
-static void plugin_vars_free_values(sys_var *vars)
+static void plugin_vars_free_values(st_mysql_sys_var **vars)
 {
   DBUG_ENTER("plugin_vars_free_values");
 
-  for (sys_var *var= vars; var; var= var->next)
+  if (!vars)
+    DBUG_VOID_RETURN;
+
+  while(st_mysql_sys_var *var= *vars++)
   {
-    sys_var_pluginvar *piv= var->cast_pluginvar();
-    if (piv &&
-        ((piv->plugin_var->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR) &&
-        (piv->plugin_var->flags & PLUGIN_VAR_MEMALLOC))
+    if ((var->flags & PLUGIN_VAR_TYPEMASK) == PLUGIN_VAR_STR &&
+         var->flags & PLUGIN_VAR_MEMALLOC)
     {
-      /* Free the string from global_system_variables. */
-      char **valptr= (char**) piv->real_value_ptr(NULL, OPT_GLOBAL);
+      char **val;
+      if (var->flags & PLUGIN_VAR_THDLOCAL)
+      {
+        st_bookmark *v= find_bookmark(0, var->name, var->flags);
+        if (!v)
+          continue;
+        val= (char**)(global_system_variables.dynamic_variables_ptr + v->offset);
+      }
+      else
+        val= *(char***) (var + 1);
+
       DBUG_PRINT("plugin", ("freeing value for: '%s'  addr: %p",
-                            var->name.str, valptr));
-      my_free(*valptr);
-      *valptr= NULL;
+                            var->name, val));
+      my_free(*val);
+      *val= NULL;
     }
   }
   DBUG_VOID_RETURN;
@@ -3416,11 +3427,11 @@ static int pluginvar_sysvar_flags(const st_mysql_sys_var *p)
 }
 
 sys_var_pluginvar::sys_var_pluginvar(sys_var_chain *chain, const char *name_arg,
-        st_plugin_int *p, st_mysql_sys_var *pv)
+        st_plugin_int *p, st_mysql_sys_var *pv, const char *substitute)
     : sys_var(chain, name_arg, pv->comment, pluginvar_sysvar_flags(pv),
               0, pv->flags & PLUGIN_VAR_NOCMDOPT ? -1 : 0, NO_ARG,
               pluginvar_show_type(pv), 0,
-              NULL, VARIABLE_NOT_IN_BINLOG, NULL, NULL, NULL),
+              NULL, VARIABLE_NOT_IN_BINLOG, NULL, NULL, substitute),
     plugin(p), plugin_var(pv)
 {
   plugin_var->name= name_arg;
@@ -4032,7 +4043,7 @@ static my_option *construct_help_options(MEM_ROOT *mem_root,
   bzero(opts, sizeof(my_option) * count);
 
   /**
-    some plugin variables (those that don't have PLUGIN_VAR_NOSYSVAR flag)
+    some plugin variables
     have their names prefixed with the plugin name. Restore the names here
     to get the correct (not double-prefixed) help text.
     We won't need @@sysvars anymore and don't care about their proper names.
@@ -4144,9 +4155,6 @@ static int test_plugin_options(MEM_ROOT *tmp_root, struct st_plugin_int *tmp,
         char *varname;
         sys_var *v;
 
-        if (o->flags & PLUGIN_VAR_NOSYSVAR)
-          continue;
-
         tmp_backup[tmp->nbackups++].save(&o->name);
         if ((var= find_bookmark(tmp->name.str, o->name, o->flags)))
         {
@@ -4162,7 +4170,14 @@ static int test_plugin_options(MEM_ROOT *tmp_root, struct st_plugin_int *tmp,
           my_casedn_str(&my_charset_latin1, varname);
           convert_dash_to_underscore(varname, len-1);
         }
-        v= new (mem_root) sys_var_pluginvar(&chain, varname, tmp, o);
+        if (o->flags & PLUGIN_VAR_NOSYSVAR)
+        {
+          o->name= varname;
+          continue;
+        }
+
+        const char *s= o->flags & PLUGIN_VAR_DEPRECATED ? "" : NULL;
+        v= new (mem_root) sys_var_pluginvar(&chain, varname, tmp, o, s);
         v->test_load= (var ? &var->loaded : &static_unload);
         DBUG_ASSERT(static_unload == FALSE);
 

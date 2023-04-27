@@ -496,7 +496,7 @@ MYSQL_METHODS embedded_methods=
 
 char **copy_arguments(int argc, char **argv)
 {
-  uint length= 0;
+  size_t length= 0;
   char **from, **res, **end= argv+argc;
 
   for (from=argv ; from != end ; from++)
@@ -526,7 +526,6 @@ int init_embedded_server(int argc, char **argv, char **groups)
    */
   int *argcp;
   char ***argvp;
-  int fake_argc = 1;
   char *fake_argv[] = { (char *)"", 0 };
   const char *fake_groups[] = { "server", "embedded", 0 };
   my_bool acl_error;
@@ -539,16 +538,14 @@ int init_embedded_server(int argc, char **argv, char **groups)
   if (init_early_variables())
     return 1;
 
-  if (argc)
+  if (!argc)
   {
-    argcp= &argc;
-    argvp= (char***) &argv;
+    argc= 1;
+    argv= fake_argv;
   }
-  else
-  {
-    argcp= &fake_argc;
-    argvp= (char ***) &fake_argv;
-  }
+  argcp= &argc;
+  argvp= &argv;
+
   if (!groups)
     groups= (char**) fake_groups;
 
@@ -674,7 +671,7 @@ void end_embedded_server()
 }
 
 
-void init_embedded_mysql(MYSQL *mysql, int client_flag)
+void init_embedded_mysql(MYSQL *mysql, ulong client_flag)
 {
   THD *thd = (THD *)mysql->thd;
   thd->mysql= mysql;
@@ -694,7 +691,7 @@ void init_embedded_mysql(MYSQL *mysql, int client_flag)
   create_new_thread(), and prepare_new_connection_state().  This should
   be refactored to avoid code duplication.
 */
-void *create_embedded_thd(int client_flag)
+void *create_embedded_thd(ulong client_flag)
 {
   THD * thd= new THD(next_thread_id());
 
@@ -710,7 +707,7 @@ void *create_embedded_thd(int client_flag)
   thd->set_command(COM_SLEEP);
   thd->set_time();
   thd->init_for_queries();
-  thd->client_capabilities= client_flag;
+  thd->client_capabilities= client_flag | MARIADB_CLIENT_EXTENDED_METADATA;
   thd->real_id= pthread_self();
 
   thd->db= null_clex_str;
@@ -841,7 +838,7 @@ int check_embedded_connection(MYSQL *mysql, const char *db)
   /* acl_authenticate() takes the data from thd->net->read_pos */
   thd->net.read_pos= (uchar*)buf;
 
-  if (acl_authenticate(thd, 0, end - buf))
+  if (acl_authenticate(thd, (uint) (end - buf)))
   {
     my_free(thd->security_ctx->user);
     goto err;
@@ -1111,11 +1108,11 @@ bool Protocol_text::store_field_metadata(const THD * thd,
   client_field->flags= (uint16) server_field.flags;
   client_field->decimals= server_field.decimals;
 
-  client_field->db_length=		strlen(client_field->db);
-  client_field->table_length=		strlen(client_field->table);
-  client_field->name_length=		strlen(client_field->name);
-  client_field->org_name_length=	strlen(client_field->org_name);
-  client_field->org_table_length=	strlen(client_field->org_table);
+  client_field->db_length=		(uint)strlen(client_field->db);
+  client_field->table_length=		(uint)strlen(client_field->table);
+  client_field->name_length=		(uint)strlen(client_field->name);
+  client_field->org_name_length=	(uint)strlen(client_field->org_name);
+  client_field->org_table_length=	(uint)strlen(client_field->org_table);
 
   client_field->catalog= dup_str_aux(field_alloc, "def", 3, cs, thd_cs);
   client_field->catalog_length= 3;
@@ -1389,12 +1386,12 @@ bool Protocol::net_store_data(const uchar *from, size_t length)
 
   if (!(field_buf= (char*) alloc_root(alloc, length + sizeof(uint) + 1)))
     return TRUE;
-  *(uint *)field_buf= length;
+  *(uint *)field_buf= (uint)length;
   *next_field= field_buf + sizeof(uint);
   memcpy((uchar*) *next_field, from, length);
   (*next_field)[length]= 0;
   if (next_mysql_field->max_length < length)
-    next_mysql_field->max_length=length;
+    next_mysql_field->max_length=(ulong)length;
   ++next_field;
   ++next_mysql_field;
   return FALSE;
@@ -1404,7 +1401,7 @@ bool Protocol::net_store_data(const uchar *from, size_t length)
 bool Protocol::net_store_data_cs(const uchar *from, size_t length,
                               CHARSET_INFO *from_cs, CHARSET_INFO *to_cs)
 {
-  uint conv_length= to_cs->mbmaxlen * length / from_cs->mbminlen;
+  size_t conv_length= length * to_cs->mbmaxlen / from_cs->mbminlen;
   uint dummy_error;
   char *field_buf;
   if (!thd->mysql)            // bootstrap file handling
@@ -1415,10 +1412,10 @@ bool Protocol::net_store_data_cs(const uchar *from, size_t length,
   *next_field= field_buf + sizeof(uint);
   length= copy_and_convert(*next_field, conv_length, to_cs,
                            (const char*) from, length, from_cs, &dummy_error);
-  *(uint *) field_buf= length;
+  *(uint *) field_buf= (uint)length;
   (*next_field)[length]= 0;
   if (next_mysql_field->max_length < length)
-    next_mysql_field->max_length= length;
+    next_mysql_field->max_length= (ulong)length;
   ++next_field;
   ++next_mysql_field;
   return false;

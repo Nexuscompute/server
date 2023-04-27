@@ -1,5 +1,5 @@
 /*
-      Copyright (c) 2013, 2018, Oracle and/or its affiliates. All rights reserved.
+      Copyright (c) 2013, 2022, Oracle and/or its affiliates.
 
       This program is free software; you can redistribute it and/or modify
       it under the terms of the GNU General Public License, version 2.0,
@@ -40,6 +40,11 @@
 
 THR_LOCK table_replication_applier_configuration::m_table_lock;
 
+PFS_engine_table_share_state
+table_replication_applier_configuration::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_replication_applier_configuration::m_share=
 {
@@ -54,7 +59,9 @@ table_replication_applier_configuration::m_share=
   { C_STRING_WITH_LEN("CREATE TABLE replication_applier_configuration("
   "CHANNEL_NAME VARCHAR(256) collate utf8_general_ci not null comment 'Replication channel name.',"
   "DESIRED_DELAY INTEGER not null comment 'Target number of seconds the replica should be delayed to the master.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table* table_replication_applier_configuration::create(void)
@@ -172,7 +179,7 @@ int table_replication_applier_configuration::read_row_values(TABLE *table,
         set_field_ulong(f, static_cast<ulong>(m_row.desired_delay));
         break;
       default:
-        DBUG_ASSERT(false);
+        assert(false);
       }
     }
   }

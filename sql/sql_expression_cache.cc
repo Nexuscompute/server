@@ -63,7 +63,7 @@ void Expression_cache_tmptable::disable_cache()
   cache_table= NULL;
   update_tracker();
   if (tracker)
-    tracker->cache= NULL;
+    tracker->detach_from_cache();
 }
 
 
@@ -114,7 +114,7 @@ void Expression_cache_tmptable::init()
 
   cache_table_param.init();
   /* dependent items and result */
-  cache_table_param.field_count= items.elements;
+  cache_table_param.field_count= cache_table_param.func_count= items.elements;
   /* postpone table creation to index description */
   cache_table_param.skip_create_table= 1;
 
@@ -189,6 +189,8 @@ Expression_cache_tmptable::~Expression_cache_tmptable()
   else
   {
     update_tracker();
+    if (tracker)
+      tracker->detach_from_cache();
     tracker= NULL;
   }
 }

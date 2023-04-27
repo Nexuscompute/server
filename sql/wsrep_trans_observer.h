@@ -1,4 +1,4 @@
-/* Copyright 2016-2021 Codership Oy <http://www.codership.com>
+/* Copyright 2016-2023 Codership Oy <http://www.codership.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -217,6 +217,19 @@ static inline bool wsrep_run_commit_hook(THD* thd, bool all)
     }
     mysql_mutex_unlock(&thd->LOCK_thd_data);
   }
+
+  mysql_mutex_lock(&thd->LOCK_thd_data);
+  /* Transaction creating sequence is TOI or RSU,
+  CREATE [TEMPORARY] SEQUENCE = CREATE + INSERT (initial value)
+  and replicated using statement based replication, thus
+  the commit hooks will be skipped */
+  if (ret &&
+      (thd->wsrep_cs().mode() == wsrep::client_state::m_toi ||
+       thd->wsrep_cs().mode() == wsrep::client_state::m_rsu) &&
+      thd->lex->sql_command == SQLCOM_CREATE_SEQUENCE)
+    ret= false;
+  mysql_mutex_unlock(&thd->LOCK_thd_data);
+
   DBUG_PRINT("wsrep", ("return: %d", ret));
   DBUG_RETURN(ret);
 }
@@ -232,6 +245,10 @@ static inline int wsrep_before_prepare(THD* thd, bool all)
   WSREP_DEBUG("wsrep_before_prepare: %d", wsrep_is_real(thd, all));
   int ret= 0;
   DBUG_ASSERT(wsrep_run_commit_hook(thd, all));
+  if ((ret= thd->wsrep_parallel_slave_wait_for_prior_commit()))
+  {
+    DBUG_RETURN(ret);
+  }
   if ((ret= thd->wsrep_cs().before_prepare()) == 0)
   {
     DBUG_ASSERT(!thd->wsrep_trx().ws_meta().gtid().is_undefined());

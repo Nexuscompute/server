@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -94,6 +94,12 @@ extern "C" {
 */
 #define PSI_FLAG_VOLATILITY_SESSION (1 << 6)
 
+/**
+  System thread flag.
+  Indicates that the instrumented object exists on a system thread.
+*/
+#define PSI_FLAG_THREAD_SYSTEM (1 << 9)
+
 #ifdef HAVE_PSI_INTERFACE
 
 /**
@@ -163,6 +169,13 @@ extern "C" {
 #endif /* HAVE_PSI_INTERFACE */
 
 /** @} */
+
+/**
+  Instrumented memory key.
+  To instrument memory, a memory key must be obtained using @c register_memory.
+  Using a zero key always disable the instrumentation.
+*/
+typedef unsigned int PSI_memory_key;
 
 #ifdef __cplusplus
 }

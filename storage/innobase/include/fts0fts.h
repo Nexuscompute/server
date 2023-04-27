@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2021, MariaDB Corporation.
+Copyright (c) 2016, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -355,10 +355,10 @@ struct fts_stopword_t;
 extern const char*	fts_default_stopword[];
 
 /** Variable specifying the maximum FTS cache size for each table */
-extern ulong		fts_max_cache_size;
+extern Atomic_relaxed<size_t> fts_max_cache_size;
 
 /** Variable specifying the total memory allocated for FTS cache */
-extern ulong		fts_max_total_cache_size;
+extern Atomic_relaxed<size_t> fts_max_total_cache_size;
 
 /** Variable specifying the FTS result cache limit for each query */
 extern size_t		fts_result_cache_limit;
@@ -398,17 +398,6 @@ fts_get_next_doc_id(
 /*================*/
 	const dict_table_t*	table,	/*!< in: table */
 	doc_id_t*		doc_id);/*!< out: new document id */
-/*********************************************************************//**
-Update the next and last Doc ID in the CONFIG table to be the input
-"doc_id" value (+ 1). We would do so after each FTS index build or
-table truncate */
-void
-fts_update_next_doc_id(
-/*===================*/
-	trx_t*			trx,		/*!< in/out: transaction */
-	const dict_table_t*	table,		/*!< in: table */
-	doc_id_t		doc_id)		/*!< in: DOC ID to set */
-	MY_ATTRIBUTE((nonnull(2)));
 
 /******************************************************************//**
 Create a new fts_doc_ids_t.
@@ -621,14 +610,6 @@ fts_create(
 	dict_table_t*	table);			/*!< out: table with FTS
 						indexes */
 
-/**********************************************************************//**
-Free the FTS resources. */
-void
-fts_free(
-/*=====*/
-	dict_table_t*   table);			/*!< in/out: table with
-						FTS indexes */
-
 /*********************************************************************//**
 Run OPTIMIZE on the given table.
 @return DB_SUCCESS if all OK */
@@ -829,15 +810,14 @@ fts_get_max_doc_id(
 /*===============*/
 	dict_table_t*	table);			/*!< in: user table */
 
-/******************************************************************//**
-Check whether user supplied stopword table exists and is of
-the right format.
-@return the stopword column charset if qualifies */
-CHARSET_INFO*
-fts_valid_stopword_table(
-/*=====================*/
-	const char*	stopword_table_name);	/*!< in: Stopword table
-						name */
+/** Check whether a stopword table is in the right format.
+@param stopword_table_name   table name
+@param row_end   name of the system-versioning end column, or "value"
+@return the stopword column charset
+@retval NULL if the table does not exist or qualify */
+CHARSET_INFO *fts_valid_stopword_table(const char *stopword_table_name,
+                                       const char **row_end= NULL);
+
 /****************************************************************//**
 This function loads specified stopword into FTS cache
 @return true if success */
@@ -949,6 +929,18 @@ and fetch the parent table id and index id
 bool fts_check_aux_table(const char *name,
                          table_id_t *table_id,
                          index_id_t *index_id);
+
+/** Update the last document id. This function could create a new
+transaction to update the last document id.
+@param	table	table to be updated
+@param	doc_id	last document id
+@param	trx	update trx or null
+@retval DB_SUCCESS if OK */
+dberr_t
+fts_update_sync_doc_id(const dict_table_t *table,
+		       doc_id_t  doc_id,
+		       trx_t *trx)
+	MY_ATTRIBUTE((nonnull(1)));
 
 /** Sync the table during commit phase
 @param[in]	table	table to be synced */

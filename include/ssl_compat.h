@@ -1,5 +1,5 @@
 /*
- Copyright (c) 2016, 2021, MariaDB Corporation.
+ Copyright (c) 2016, 2022, MariaDB Corporation.
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -19,7 +19,8 @@
 /* OpenSSL version specific definitions */
 #if defined(OPENSSL_VERSION_NUMBER)
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L && \
+	!(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x30500000L)
 #define HAVE_OPENSSL11 1
 #define SSL_LIBRARY OpenSSL_version(OPENSSL_VERSION)
 #define ERR_remove_state(X) ERR_clear_error()
@@ -73,7 +74,10 @@
 #define EVP_MD_CTX_SIZE                 sizeof(EVP_MD_CTX)
 #endif
 
+#ifndef DH_set0_pqg
 #define DH_set0_pqg(D,P,Q,G)            ((D)->p= (P), (D)->g= (G))
+#endif
+
 #define EVP_CIPHER_CTX_encrypting(ctx)  ((ctx)->encrypt)
 #define EVP_CIPHER_CTX_SIZE             sizeof(EVP_CIPHER_CTX)
 

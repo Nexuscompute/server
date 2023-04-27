@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2021, MariaDB Corporation.
+   Copyright (c) 2010, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -41,6 +41,7 @@
                                        // find_item_in_list,
                                        // RESOLVED_AGAINST_ALIAS, ...
 #include "sql_expression_cache.h"
+#include "sql_lex.h"                   // empty_clex_str
 
 const String my_null_string("NULL", 4, default_charset_info);
 const String my_default_string("DEFAULT", 7, default_charset_info);
@@ -71,12 +72,11 @@ bool cmp_items(Item *a, Item *b)
 /**
   Set max_sum_func_level if it is needed
 */
-inline void set_max_sum_func_level(SELECT_LEX *select)
+inline void set_max_sum_func_level(THD *thd, SELECT_LEX *select)
 {
-  LEX *lex_s= select->parent_lex;
-  if (lex_s->in_sum_func &&
-      lex_s->in_sum_func->nest_level >= select->nest_level)
-    set_if_bigger(lex_s->in_sum_func->max_sum_func_level,
+  if (thd->lex->in_sum_func &&
+      thd->lex->in_sum_func->nest_level >= select->nest_level)
+    set_if_bigger(thd->lex->in_sum_func->max_sum_func_level,
                   select->nest_level - 1);
 }
 
@@ -655,7 +655,6 @@ Item_ident::Item_ident(THD *thd, Name_resolution_context *context_arg,
    can_be_depended(TRUE), alias_name_used(FALSE)
 {
   name= field_name_arg;
-  DBUG_ASSERT(!context || context->select_lex);
 }
 
 
@@ -673,7 +672,6 @@ Item_ident::Item_ident(THD *thd, TABLE_LIST *view_arg,
    can_be_depended(TRUE), alias_name_used(FALSE)
 {
   name= field_name_arg;
-  DBUG_ASSERT(!context || context->select_lex);
 }
 
 
@@ -695,9 +693,7 @@ Item_ident::Item_ident(THD *thd, Item_ident *item)
    cached_field_index(item->cached_field_index),
    can_be_depended(item->can_be_depended),
    alias_name_used(item->alias_name_used)
-{
-  DBUG_ASSERT(!context || context->select_lex);
-}
+{}
 
 void Item_ident::cleanup()
 {
@@ -727,7 +723,6 @@ bool Item_ident::remove_dependence_processor(void * arg)
   context= &((st_select_lex *) arg)->context;
   DBUG_RETURN(0);
 }
-
 
 bool Item_ident::collect_outer_ref_processor(void *param)
 {
@@ -965,8 +960,7 @@ bool Item_field::check_field_expression_processor(void *arg)
           (!field->vcol_info && !org_field->vcol_info)) &&
          field->field_index >= org_field->field_index))
     {
-      my_error(ER_EXPRESSION_REFERS_TO_UNINIT_FIELD,
-               MYF(0),
+      my_error(ER_EXPRESSION_REFERS_TO_UNINIT_FIELD, MYF(0),
                org_field->field_name.str, field->field_name.str);
       return 1;
     }
@@ -1322,12 +1316,11 @@ Item *Item_cache::safe_charset_converter(THD *thd, CHARSET_INFO *tocs)
   Item *conv= example->safe_charset_converter(thd, tocs);
   if (conv == example)
     return this;
-  Item_cache *cache;
-  if (!conv || conv->fix_fields(thd, (Item **) NULL) ||
-      unlikely(!(cache= new (thd->mem_root) Item_cache_str(thd, conv))))
-    return NULL; // Safe conversion is not possible, or OEM
-  cache->setup(thd, conv);
-  return cache;
+  if (!conv || conv->fix_fields(thd, (Item **) NULL))
+    return NULL; // Safe conversion is not possible, or OOM
+  setup(thd, conv);
+  thd->change_item_tree(&example, conv);
+  return this;
 }
 
 
@@ -1516,17 +1509,11 @@ int Item::save_in_field_no_warnings(Field *field, bool no_conversions)
   TABLE *table= field->table;
   THD *thd= table->in_use;
   enum_check_fields org_count_cuted_fields= thd->count_cuted_fields;
-  sql_mode_t org_sql_mode= thd->variables.sql_mode;
   MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
-
-  thd->variables.sql_mode&= ~(MODE_NO_ZERO_IN_DATE | MODE_NO_ZERO_DATE);
-  thd->variables.sql_mode|= MODE_INVALID_DATES;
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-
+  Use_relaxed_field_copy urfc(table->in_use);
   res= save_in_field(field, no_conversions);
 
   thd->count_cuted_fields= org_count_cuted_fields;
-  thd->variables.sql_mode= org_sql_mode;
   dbug_tmp_restore_column_map(&table->write_set, old_map);
   return res;
 }
@@ -1593,12 +1580,14 @@ bool Item_field::check_vcol_func_processor(void *arg)
       }
     }
   }
-  if (field && (field->unireg_check == Field::NEXT_NUMBER))
-  {
-    // Auto increment fields are unsupported
-    return mark_unsupported_function(field_name.str, arg, VCOL_FIELD_REF | VCOL_AUTO_INC);
-  }
-  return mark_unsupported_function(field_name.str, arg, VCOL_FIELD_REF);
+
+  uint r= VCOL_FIELD_REF;
+  if (field && field->unireg_check == Field::NEXT_NUMBER)
+    r|= VCOL_AUTO_INC;
+  if (field && field->vcol_info &&
+      field->vcol_info->flags & (VCOL_NOT_STRICTLY_DETERMINISTIC | VCOL_AUTO_INC))
+    r|= VCOL_NON_DETERMINISTIC;
+  return mark_unsupported_function(field_name.str, arg, r);
 }
 
 
@@ -2335,7 +2324,8 @@ void Item::split_sum_func2(THD *thd, Ref_ptr_array ref_pointer_array,
 
     if (unlikely((!(used_tables() & ~PARAM_TABLE_BIT) ||
                   (type() == REF_ITEM &&
-                   ((Item_ref*)this)->ref_type() != Item_ref::VIEW_REF))))
+                   ((Item_ref*)this)->ref_type() != Item_ref::VIEW_REF &&
+                   ((Item_ref*)this)->ref_type() != Item_ref::DIRECT_REF))))
         return;
   }
 
@@ -2652,7 +2642,6 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
     safe_args[1]= args[item_sep];
   }
 
-  bool res= FALSE;
   uint i;
 
   DBUG_ASSERT(!thd->stmt_arena->is_stmt_prepare());
@@ -2672,19 +2661,31 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
         args[item_sep]= safe_args[1];
       }
       my_coll_agg_error(args, nargs, fname.str, item_sep);
-      res= TRUE;
-      break; // we cannot return here, we need to restore "arena".
+      return TRUE;
     }
-
-    thd->change_item_tree(arg, conv);
 
     if (conv->fix_fields_if_needed(thd, arg))
+      return TRUE;
+
+    Query_arena *arena, backup;
+    arena= thd->activate_stmt_arena_if_needed(&backup);
+    if (arena)
     {
-      res= TRUE;
-      break; // we cannot return here, we need to restore "arena".
+      Item_direct_ref_to_item *ref=
+        new (thd->mem_root) Item_direct_ref_to_item(thd, *arg);
+      if ((ref == NULL) || ref->fix_fields(thd, (Item **)&ref))
+      {
+        thd->restore_active_arena(arena, &backup);
+        return TRUE;
+      }
+      *arg= ref;
+      thd->restore_active_arena(arena, &backup);
+      ref->change_item(thd, conv);
     }
+    else
+      thd->change_item_tree(arg, conv);
   }
-  return res;
+  return FALSE;
 }
 
 
@@ -2758,14 +2759,17 @@ Item_sp::Item_sp(THD *thd, Item_sp *item):
   memset(&sp_mem_root, 0, sizeof(sp_mem_root));
 }
 
-LEX_CSTRING Item_sp::func_name_cstring(THD *thd) const
+LEX_CSTRING
+Item_sp::func_name_cstring(THD *thd, bool is_package_function) const
 {
   /* Calculate length to avoid reallocation of string for sure */
   size_t len= (((m_name->m_explicit_name ? m_name->m_db.length : 0) +
               m_name->m_name.length)*2 + //characters*quoting
-             2 +                         // ` and `
+             2 +                         // quotes for the function name
+             2 +                         // quotes for the package name
              (m_name->m_explicit_name ?
               3 : 0) +                   // '`', '`' and '.' for the db
+             1 +                         // '.' between package and function
              1 +                         // end of string
              ALIGN_SIZE(1));             // to avoid String reallocation
   String qname((char *)alloc_root(thd->mem_root, len), len,
@@ -2777,7 +2781,21 @@ LEX_CSTRING Item_sp::func_name_cstring(THD *thd) const
     append_identifier(thd, &qname, &m_name->m_db);
     qname.append('.');
   }
-  append_identifier(thd, &qname, &m_name->m_name);
+  if (is_package_function)
+  {
+    /*
+      In case of a package function split `pkg.func` and print
+      quoted `pkg` and `func` separately, so the entire result looks like:
+         `db`.`pkg`.`func`
+    */
+    Database_qualified_name tmp= Database_qualified_name::split(m_name->m_name);
+    DBUG_ASSERT(tmp.m_db.length);
+    append_identifier(thd, &qname, &tmp.m_db);
+    qname.append('.');
+    append_identifier(thd, &qname, &tmp.m_name);
+  }
+  else
+    append_identifier(thd, &qname, &m_name->m_name);
   return { qname.c_ptr_safe(), qname.length() };
 }
 
@@ -3116,17 +3134,6 @@ Item_field::Item_field(THD *thd, Item_field *item)
 {
   collation.set(DERIVATION_IMPLICIT);
   with_flags|= item_with_t::FIELD;
-}
-
-
-bool Item_field::is_json_type()
-{
-  if (!field->check_constraint ||
-      field->check_constraint->expr->type() != FUNC_ITEM)
-    return FALSE;
-
-  Item_func *f= (Item_func *) field->check_constraint->expr;
-  return f->functype() == Item_func::JSON_VALID_FUNC;
 }
 
 
@@ -3469,7 +3476,7 @@ bool Item_field::is_null_result()
 
 bool Item_field::eq(const Item *item, bool binary_cmp) const
 {
-  Item *real_item2= ((Item *) item)->real_item();
+  const Item *real_item2= item->real_item();
   if (real_item2->type() != FIELD_ITEM)
     return 0;
   
@@ -3597,11 +3604,6 @@ void Item_field::fix_after_pullout(st_select_lex *new_parent, Item **ref,
     {
       /* just pull to the upper context */
       ctx->outer_context= context->outer_context->outer_context;
-    }
-    else
-    {
-      /* No upper context (merging Derived/VIEW where context chain ends) */
-      ctx->outer_context= NULL;
     }
     ctx->table_list= context->first_name_resolution_table;
     ctx->select_lex= new_parent;
@@ -4502,6 +4504,22 @@ bool Item_param::is_evaluable_expression() const
     return true;
   case NO_VALUE:
     return true; // Not assigned yet, so we don't know
+  case IGNORE_VALUE:
+  case DEFAULT_VALUE:
+    break;
+  }
+  return false;
+}
+
+
+bool Item_param::check_assignability_to(const Field *to, bool ignore) const
+{
+  switch (state) {
+  case SHORT_DATA_VALUE:
+  case LONG_DATA_VALUE:
+  case NULL_VALUE:
+    return to->check_assignability_from(type_handler(), ignore);
+  case NO_VALUE:
   case IGNORE_VALUE:
   case DEFAULT_VALUE:
     break;
@@ -5634,7 +5652,6 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
   Name_resolution_context *last_checked_context= context;
   Item **ref= (Item **) not_found_item;
   SELECT_LEX *current_sel= context->select_lex;
-  LEX *lex_s= current_sel->parent_lex;
   Name_resolution_context *outer_context= 0;
   SELECT_LEX *select= 0;
 
@@ -5736,18 +5753,20 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
               return -1;
             thd->change_item_tree(reference, rf);
             select->inner_refs_list.push_back(rf, thd->mem_root);
-            rf->in_sum_func= lex_s->in_sum_func;
+            rf->in_sum_func= thd->lex->in_sum_func;
           }
           /*
             A reference is resolved to a nest level that's outer or the same as
             the nest level of the enclosing set function : adjust the value of
             max_arg_level for the function if it's needed.
           */
-          if (lex_s->in_sum_func &&
-              lex_s->in_sum_func->nest_level >= select->nest_level)
+          if (thd->lex->in_sum_func &&
+              last_checked_context->select_lex->parent_lex ==
+              context->select_lex->parent_lex &&
+              thd->lex->in_sum_func->nest_level >= select->nest_level)
           {
             Item::Type ref_type= (*reference)->type();
-            set_if_bigger(lex_s->in_sum_func->max_arg_level,
+            set_if_bigger(thd->lex->in_sum_func->max_arg_level,
                           select->nest_level);
             set_field(*from_field);
             base_flags|= item_base_t::FIXED;
@@ -5768,10 +5787,12 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
                             ((ref_type == REF_ITEM || ref_type == FIELD_ITEM) ?
                              (Item_ident*) (*reference) :
                              0), false);
-          if (lex_s->in_sum_func &&
-              lex_s->in_sum_func->nest_level >= select->nest_level)
+          if (thd->lex->in_sum_func &&
+              last_checked_context->select_lex->parent_lex ==
+              context->select_lex->parent_lex &&
+              thd->lex->in_sum_func->nest_level >= select->nest_level)
           {
-            set_if_bigger(lex_s->in_sum_func->max_arg_level,
+            set_if_bigger(thd->lex->in_sum_func->max_arg_level,
                           select->nest_level);
           }
           /*
@@ -5864,7 +5885,7 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
     {
       outer_context->select_lex->inner_refs_list.push_back((Item_outer_ref*)rf,
                                                            thd->mem_root);
-      ((Item_outer_ref*)rf)->in_sum_func= lex_s->in_sum_func;
+      ((Item_outer_ref*)rf)->in_sum_func= thd->lex->in_sum_func;
     }
     thd->change_item_tree(reference, rf);
     /*
@@ -5879,7 +5900,7 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
       We can not "move" aggregate function in the place where
       its arguments are not defined.
     */
-    set_max_sum_func_level(select);
+    set_max_sum_func_level(thd, select);
     mark_as_dependent(thd, last_checked_context->select_lex,
                       context->select_lex, rf,
                       rf, false);
@@ -5892,7 +5913,7 @@ Item_field::fix_outer_field(THD *thd, Field **from_field, Item **reference)
       We can not "move" aggregate function in the place where
       its arguments are not defined.
     */
-    set_max_sum_func_level(select);
+    set_max_sum_func_level(thd, select);
     mark_as_dependent(thd, last_checked_context->select_lex,
                       context->select_lex,
                       this, (Item_ident*)*reference, false);
@@ -5972,19 +5993,17 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
   Field *from_field= (Field *)not_found_field;
   bool outer_fixed= false;
   SELECT_LEX *select;
-  LEX *lex_s;
   if (context)
   {
     select= context->select_lex;
-    lex_s= context->select_lex->parent_lex;
   }
   else
   {
     // No real name resolution, used somewhere in SP
     DBUG_ASSERT(field);
     select= NULL;
-    lex_s= NULL;
   }
+
 
   if (select && select->in_tvc)
   {
@@ -6053,7 +6072,7 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
               We can not "move" aggregate function in the place where
               its arguments are not defined.
             */
-            set_max_sum_func_level(select);
+            set_max_sum_func_level(thd, select);
             set_field(new_field);
             depended_from= (*((Item_field**)res))->depended_from;
             return 0;
@@ -6082,7 +6101,7 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
               We can not "move" aggregate function in the place where
               its arguments are not defined.
             */
-            set_max_sum_func_level(select);
+            set_max_sum_func_level(thd, select);
             return FALSE;
           }
         }
@@ -6119,11 +6138,11 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
         goto mark_non_agg_field;
     }
 
-    if (lex_s &&
-        lex_s->in_sum_func &&
-        lex_s->in_sum_func->nest_level ==
+    if (select && !thd->lex->current_select->no_wrap_view_item &&
+        thd->lex->in_sum_func &&
+        thd->lex->in_sum_func->nest_level == 
         select->nest_level)
-      set_if_bigger(lex_s->in_sum_func->max_arg_level,
+      set_if_bigger(thd->lex->in_sum_func->max_arg_level,
                     select->nest_level);
     /*
       if it is not expression from merged VIEW we will set this field.
@@ -6186,12 +6205,9 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
   }
 #endif
   base_flags|= item_base_t::FIXED;
-  if (field->vcol_info)
-    fix_session_vcol_expr_for_read(thd, field, field->vcol_info);
   if (thd->variables.sql_mode & MODE_ONLY_FULL_GROUP_BY &&
-      !outer_fixed &&
+      !outer_fixed && !thd->lex->in_sum_func &&
       select &&
-      !lex_s->in_sum_func &&
       select->cur_pos_in_select_list != UNDEF_POS &&
       select->join)
   {
@@ -6226,13 +6242,13 @@ mark_non_agg_field:
       */
       select_lex= context->select_lex;
     }
-    if (!lex_s || !lex_s->in_sum_func)
+    if (!thd->lex->in_sum_func)
       select_lex->set_non_agg_field_used(true);
     else
     {
       if (outer_fixed)
-        lex_s->in_sum_func->outer_fields.push_back(this, thd->mem_root);
-      else if (lex_s->in_sum_func->nest_level !=
+        thd->lex->in_sum_func->outer_fields.push_back(this, thd->mem_root);
+      else if (thd->lex->in_sum_func->nest_level !=
           select->nest_level)
         select_lex->set_non_agg_field_used(true);
     }
@@ -7225,6 +7241,25 @@ Item_bin_string::Item_bin_string(THD *thd, const char *str, size_t str_length):
 }
 
 
+void Item_bin_string::print(String *str, enum_query_type query_type)
+{
+  if (!str_value.length())
+  {
+    /*
+      Historically a bit string such as b'01100001'
+      prints itself in the hex hybrid notation: 0x61
+      In case of an empty bit string b'', the hex hybrid
+      notation would result in a bad syntax: 0x
+      So let's print empty bit strings using bit string notation: b''
+    */
+    static const LEX_CSTRING empty_bit_string= {STRING_WITH_LEN("b''")};
+    str->append(empty_bit_string);
+  }
+  else
+    Item_hex_hybrid::print(str, query_type);
+}
+
+
 void Item_date_literal::print(String *str, enum_query_type query_type)
 {
   str->append(STRING_WITH_LEN("DATE'"));
@@ -7323,7 +7358,7 @@ bool Item_null::send(Protocol *protocol, st_value *buffer)
 
 bool Item::cache_const_expr_analyzer(uchar **arg)
 {
-  bool *cache_flag= (bool*)*arg;
+  uchar *cache_flag= *arg;
   if (!*cache_flag)
   {
     Item *item= real_item();
@@ -7362,9 +7397,9 @@ bool Item::cache_const_expr_analyzer(uchar **arg)
 
 Item* Item::cache_const_expr_transformer(THD *thd, uchar *arg)
 {
-  if (*(bool*)arg)
+  if (*arg)
   {
-    *((bool*)arg)= FALSE;
+    *arg= FALSE;
     Item_cache *cache= get_cache(thd);
     if (!cache)
       return NULL;
@@ -7689,12 +7724,6 @@ Item *get_field_item_for_having(THD *thd, Item *item, st_select_lex *sel)
   return NULL; 
 }
 
-Item *Item_ident::derived_field_transformer_for_having(THD *thd, uchar *arg)
-{
-  st_select_lex *sel= (st_select_lex *)arg;
-  context= &sel->context;
-  return this;
-}
 
 Item *Item_field::derived_field_transformer_for_having(THD *thd, uchar *arg)
 {
@@ -7983,9 +8012,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
 {
   enum_parsing_place place= NO_MATTER;
   DBUG_ASSERT(fixed() == 0);
-
   SELECT_LEX *current_sel= context->select_lex;
-  LEX *lex_s= context->select_lex->parent_lex;
 
   if (set_properties_only)
   {
@@ -7994,8 +8021,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
   else if (!ref || ref == not_found_item)
   {
     DBUG_ASSERT(reference_trough_name != 0);
-    if (!(ref= resolve_ref_in_select_and_group(thd, this,
-                                               context->select_lex)))
+    if (!(ref= resolve_ref_in_select_and_group(thd, this, context->select_lex)))
       goto error;             /* Some error occurred (e.g. ambiguous names). */
 
     if (ref == not_found_item) /* This reference was not resolved. */
@@ -8008,8 +8034,7 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
       if (unlikely(!outer_context))
       {
         /* The current reference cannot be resolved in this query. */
-        my_error(ER_BAD_FIELD_ERROR,MYF(0),
-                 this->full_name(), thd->where);
+        my_error(ER_BAD_FIELD_ERROR,MYF(0), full_name(), thd->where);
         goto error;
       }
 
@@ -8147,10 +8172,12 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
           the nest level of the enclosing set function : adjust the value of
           max_arg_level for the function if it's needed.
         */
-        if (lex_s->in_sum_func &&
-            lex_s->in_sum_func->nest_level >=
+        if (thd->lex->in_sum_func &&
+            last_checked_context->select_lex->parent_lex ==
+            context->select_lex->parent_lex &&
+            thd->lex->in_sum_func->nest_level >= 
             last_checked_context->select_lex->nest_level)
-          set_if_bigger(lex_s->in_sum_func->max_arg_level,
+          set_if_bigger(thd->lex->in_sum_func->max_arg_level,
                         last_checked_context->select_lex->nest_level);
         return FALSE;
       }
@@ -8170,10 +8197,12 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
         the nest level of the enclosing set function : adjust the value of
         max_arg_level for the function if it's needed.
       */
-      if (lex_s->in_sum_func &&
-          lex_s->in_sum_func->nest_level >=
+      if (thd->lex->in_sum_func &&
+          last_checked_context->select_lex->parent_lex ==
+          context->select_lex->parent_lex &&
+          thd->lex->in_sum_func->nest_level >= 
           last_checked_context->select_lex->nest_level)
-        set_if_bigger(lex_s->in_sum_func->max_arg_level,
+        set_if_bigger(thd->lex->in_sum_func->max_arg_level,
                       last_checked_context->select_lex->nest_level);
     }
   }
@@ -8185,7 +8214,8 @@ bool Item_ref::fix_fields(THD *thd, Item **reference)
       1. outer reference (will be fixed later by the fix_inner_refs function);
       2. an unnamed reference inside an aggregate function.
   */
-  if (!((*ref)->type() == REF_ITEM &&
+  if (!set_properties_only && 
+      !((*ref)->type() == REF_ITEM &&
        ((Item_ref *)(*ref))->ref_type() == OUTER_REF) &&
       (((*ref)->with_sum_func() && name.str &&
         !(current_sel->get_linkage() != GLOBAL_OPTIONS_TYPE &&
@@ -9494,6 +9524,12 @@ bool Item_default_value::eq(const Item *item, bool binary_cmp) const
 }
 
 
+bool Item_default_value::check_field_expression_processor(void *)
+{
+  field->default_value= ((Item_field *)(arg->real_item()))->field->default_value;
+  return 0;
+}
+
 bool Item_default_value::fix_fields(THD *thd, Item **items)
 {
   Item *real_arg;
@@ -9535,7 +9571,6 @@ bool Item_default_value::fix_fields(THD *thd, Item **items)
   }
   if (!(def_field= (Field*) thd->alloc(field_arg->field->size_of())))
     goto error;
-  cached_field= def_field;
   memcpy((void *)def_field, (void *)field_arg->field,
          field_arg->field->size_of());
   def_field->reset_fields();
@@ -9546,11 +9581,6 @@ bool Item_default_value::fix_fields(THD *thd, Item **items)
     uchar *newptr= (uchar*) thd->alloc(1+def_field->pack_length());
     if (!newptr)
       goto error;
-    /*
-      Even if DEFAULT() do not read tables fields, the default value
-      expression can do it.
-    */
-    fix_session_vcol_expr_for_read(thd, def_field, def_field->default_value);
     if (should_mark_column(thd->column_usage))
       def_field->default_value->expr->update_used_tables();
     def_field->move_field(newptr+1, def_field->maybe_null() ? newptr : 0, 1);
@@ -9569,8 +9599,7 @@ error:
 
 void Item_default_value::cleanup()
 {
-  delete cached_field;                        // Free cached blob data
-  cached_field= 0;
+  delete field;                        // Free cached blob data
   Item_field::cleanup();
 }
 
@@ -9645,6 +9674,12 @@ int Item_default_value::save_in_field(Field *field_arg, bool no_conversions)
   return Item_field::save_in_field(field_arg, no_conversions);
 }
 
+void Item_default_value::save_in_result_field(bool no_conversions)
+{
+  calculate();
+  Item_field::save_in_result_field(no_conversions);
+}
+
 double Item_default_value::val_result()
 {
   calculate();
@@ -9694,6 +9729,7 @@ bool Item_default_value::val_native_result(THD *thd, Native *to)
   return Item_field::val_native_result(thd, to);
 }
 
+
 table_map Item_default_value::used_tables() const
 {
   if (!field || !field->default_value)
@@ -9701,6 +9737,23 @@ table_map Item_default_value::used_tables() const
   if (!field->default_value->expr)           // not fully parsed field
     return static_cast<table_map>(RAND_TABLE_BIT);
   return field->default_value->expr->used_tables();
+}
+
+bool Item_default_value::register_field_in_read_map(void *arg)
+{
+  TABLE *table= (TABLE *) arg;
+  int res= 0;
+  if (!table || (table && table == field->table))
+  {
+    if (field->default_value && field->default_value->expr)
+      res= field->default_value->expr->walk(&Item::register_field_in_read_map,1,arg);
+  }
+  else if (result_field && table == result_field->table)
+  {
+    bitmap_set_bit(table->read_set, result_field->field_index);
+  }
+
+  return res;
 }
 
 /**
@@ -9865,10 +9918,14 @@ void Item_trigger_field::set_required_privilege(bool rw)
 
 bool Item_trigger_field::set_value(THD *thd, sp_rcontext * /*ctx*/, Item **it)
 {
-  Item *item= thd->sp_prepare_func_item(it);
-
-  if (!item || fix_fields_if_needed(thd, NULL))
+  if (fix_fields_if_needed(thd, NULL))
     return true;
+
+  Item *item= thd->sp_fix_func_item_for_assignment(field, it);
+  if (!item)
+    return true;
+  if (field->vers_sys_field())
+    return false;
 
   // NOTE: field->table->copy_blobs should be false here, but let's
   // remember the value at runtime to avoid subtle bugs.
@@ -10289,8 +10346,8 @@ bool Item_cache_timestamp::cache_value()
   if (!example)
     return false;
   value_cached= true;
-  null_value= example->val_native_with_conversion_result(current_thd, &m_native,
-                                                         type_handler());
+  null_value_inside= null_value=
+    example->val_native_with_conversion_result(current_thd, &m_native, type_handler());
   return true;
 }
 
@@ -10741,7 +10798,7 @@ table_map Item_direct_view_ref::used_tables() const
     table_map used= (*ref)->used_tables();
     return (used ?
             used :
-            ((null_ref_table != NO_NULL_TABLE) ?
+            (null_ref_table != NO_NULL_TABLE && !null_ref_table->const_table ?
              null_ref_table->map :
              (table_map)0 ));
   }
@@ -10848,12 +10905,52 @@ const char *dbug_print(SELECT_LEX_UNIT *x) { return dbug_print_unit(x);   }
 
 #endif /*DBUG_OFF*/
 
-
-
 void Item::register_in(THD *thd)
 {
   next= thd->free_list;
   thd->free_list= this;
+}
+
+
+Item_direct_ref_to_item::Item_direct_ref_to_item(THD *thd, Item *item)
+  : Item_direct_ref(thd, NULL, NULL, empty_clex_str, empty_clex_str)
+{
+  m_item= item;
+  ref= (Item**)&m_item;
+}
+
+bool Item_direct_ref_to_item::fix_fields(THD *thd, Item **)
+{
+  DBUG_ASSERT(m_item != NULL);
+  if (m_item->fix_fields_if_needed_for_scalar(thd, ref))
+    return TRUE;
+  set_properties();
+  return FALSE;
+}
+
+void Item_direct_ref_to_item::print(String *str, enum_query_type query_type)
+{
+  m_item->print(str, query_type);
+}
+
+Item *Item_direct_ref_to_item::safe_charset_converter(THD *thd,
+                                                      CHARSET_INFO *tocs)
+{
+  Item *conv= m_item->safe_charset_converter(thd, tocs);
+  if (conv != m_item)
+  {
+    if (conv== NULL || conv->fix_fields(thd, &conv))
+      return NULL;
+    change_item(thd, conv);
+  }
+  return this;
+}
+
+void Item_direct_ref_to_item::change_item(THD *thd, Item *i)
+{
+  DBUG_ASSERT(i->fixed());
+  thd->change_item_tree(ref, i);
+  set_properties();
 }
 
 

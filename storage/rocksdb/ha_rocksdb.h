@@ -406,7 +406,7 @@ class ha_rocksdb : public my_core::handler {
   void free_key_buffers();
 
   // the buffer size should be at least 2*Rdb_key_def::INDEX_NUMBER_SIZE
-  rocksdb::Range get_range(const int i, uchar buf[]) const;
+  rocksdb::Range get_range(const int i, uchar buf[2 * 4]) const;
 
   /*
     Perf timers for data reads
@@ -1049,7 +1049,7 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
         m_n_dropped_keys(n_dropped_keys),
         m_max_auto_incr(max_auto_incr) {}
 
-  ~Rdb_inplace_alter_ctx() {}
+  ~Rdb_inplace_alter_ctx() = default;
 
  private:
   /* Disable Copying */
@@ -1061,6 +1061,8 @@ struct Rdb_inplace_alter_ctx : public my_core::inplace_alter_handler_ctx {
 std::string rdb_corruption_marker_file_name();
 
 const int MYROCKS_MARIADB_PLUGIN_MATURITY_LEVEL= MariaDB_PLUGIN_MATURITY_STABLE;
+
+extern uint32_t rocksdb_ignore_datadic_errors;
 
 void sql_print_verbose_info(const char *format, ...);
 

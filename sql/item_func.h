@@ -469,7 +469,7 @@ public:
   class Handler
   {
   public:
-    virtual ~Handler() { }
+    virtual ~Handler() = default;
     virtual String *val_str(Item_handled_func *, String *) const= 0;
     virtual String *val_str_ascii(Item_handled_func *, String *) const= 0;
     virtual double val_real(Item_handled_func *) const= 0;
@@ -1207,6 +1207,18 @@ public:
     static LEX_CSTRING name= {STRING_WITH_LEN("<hash>") };
     return name;
   }
+};
+
+class Item_func_hash_mariadb_100403: public Item_func_hash
+{
+public:
+  Item_func_hash_mariadb_100403(THD *thd, List<Item> &item)
+   :Item_func_hash(thd, item)
+  {}
+  longlong val_int();
+  Item *get_copy(THD *thd)
+  { return get_item_copy<Item_func_hash_mariadb_100403>(thd, this); }
+  const char *func_name() const { return "<hash_mariadb_100403>"; }
 };
 
 class Item_longlong_func: public Item_int_func
@@ -2117,8 +2129,7 @@ public:
   void cleanup() override { first_eval= TRUE; Item_real_func::cleanup(); }
   bool check_vcol_func_processor(void *arg) override
   {
-    return mark_unsupported_function(func_name(), "()", arg,
-                                     VCOL_NON_DETERMINISTIC);
+    return mark_unsupported_function(func_name(), "()", arg, VCOL_SESSION_FUNC);
   }
   Item *get_copy(THD *thd) override
   { return get_item_copy<Item_func_rand>(thd, this); }
@@ -3849,8 +3860,7 @@ public:
   Item_func_sp(THD *thd, Name_resolution_context *context_arg,
                sp_name *name, const Sp_handler *sph, List<Item> &list);
 
-  virtual ~Item_func_sp()
-  {}
+  virtual ~Item_func_sp() = default;
 
   void update_used_tables() override;
 
@@ -4158,9 +4168,7 @@ public:
   void print(String *str, enum_query_type query_type) override;
   bool check_vcol_func_processor(void *arg) override
   {
-    return mark_unsupported_function(func_name(), "()", arg,
-                                     (VCOL_NON_DETERMINISTIC |
-                                      VCOL_NOT_VIRTUAL));
+    return mark_unsupported_function(func_name(), "()", arg, VCOL_NEXTVAL);
   }
 };
 

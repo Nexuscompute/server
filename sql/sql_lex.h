@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2021, MariaDB Corporation
+   Copyright (c) 2010, 2022, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -36,6 +36,7 @@
 #include "sql_limit.h"                // Select_limit_counters
 #include "json_table.h"               // Json_table_column
 #include "sql_schema.h"
+#include "table.h"
 
 /* Used for flags of nesting constructs */
 #define SELECT_NESTING_MAP_SIZE 64
@@ -765,9 +766,8 @@ public:
   }
 
   inline st_select_lex_node* get_master() { return master; }
-  inline st_select_lex_node* get_slave() { return slave; }
   void include_down(st_select_lex_node *upper);
-  void add_slave(st_select_lex_node *slave_arg);
+  void attach_single(st_select_lex_node *slave_arg);
   void include_neighbour(st_select_lex_node *before);
   void link_chain_down(st_select_lex_node *first);
   void link_neighbour(st_select_lex_node *neighbour)
@@ -1038,6 +1038,8 @@ public:
 
   bool set_lock_to_the_last_select(Lex_select_lock l);
 
+  bool can_be_merged();
+
   friend class st_select_lex;
 };
 
@@ -1199,12 +1201,14 @@ public:
     group_list_ptrs, and re-establish the original list before each execution.
   */
   SQL_I_List<ORDER>       group_list;
+  SQL_I_List<ORDER>       save_group_list;
   Group_list_ptrs        *group_list_ptrs;
 
   List<Item>          item_list;  /* list of fields & expressions */
   List<Item>          pre_fix;    /* above list before fix_fields */
   List<Item>          fix_after_optimize;
   SQL_I_List<ORDER> order_list;   /* ORDER clause */
+  SQL_I_List<ORDER> save_order_list;
   SQL_I_List<ORDER> gorder_list;
   Lex_select_limit limit_params;  /* LIMIT clause parameters */
 
@@ -1293,6 +1297,8 @@ public:
     st_select_lex.
   */
   uint curr_tvc_name;
+  /* true <=> select has been created a TVC wrapper */
+  bool is_tvc_wrapper;
   uint fields_in_window_functions;
   uint insert_tables;
   enum_parsing_place parsing_place; /* where we are parsing expression */
@@ -1342,6 +1348,9 @@ public:
     this select level.
   */
   table_map select_list_tables;
+
+  /* Set to 1 if any field in field list has ROWNUM() */
+  bool rownum_in_field_list;
 
   /* namp of nesting SELECT visibility (for aggregate functions check) */
   nesting_map name_visibility_map;
@@ -1460,6 +1469,10 @@ public:
   }
   bool setup_ref_array(THD *thd, uint order_group_num);
   void print(THD *thd, String *str, enum_query_type query_type);
+  void print_item_list(THD *thd, String *str, enum_query_type query_type);
+  void print_set_clause(THD *thd, String *str, enum_query_type query_type);
+  void print_on_duplicate_key_clause(THD *thd, String *str,
+                                     enum_query_type query_type);
   static void print_order(String *str,
                           ORDER *order,
                           enum_query_type query_type);
@@ -1744,21 +1757,12 @@ public:
   Sroutine_hash_entry **sroutines_list_own_last;
   uint sroutines_list_own_elements;
 
-  /**
-    Number of tables which were open by open_tables() and to be locked
-    by lock_tables().
-    Note that we set this member only in some cases, when this value
-    needs to be passed from open_tables() to lock_tables() which are
-    separated by some amount of code.
-  */
-  uint table_count;
-
    /*
     These constructor and destructor serve for creation/destruction
     of Query_tables_list instances which are used as backup storage.
   */
-  Query_tables_list() {}
-  ~Query_tables_list() {}
+  Query_tables_list() = default;
+  ~Query_tables_list() = default;
 
   /* Initializes (or resets) Query_tables_list object for "real" use. */
   void reset_query_tables_list(bool init);
@@ -1948,6 +1952,11 @@ public:
     BINLOG_STMT_UNSAFE_AUTOINC_NOT_FIRST,
 
     /**
+       Autoincrement lock mode is incompatible with STATEMENT binlog format.
+    */
+    BINLOG_STMT_UNSAFE_AUTOINC_LOCK_MODE,
+
+    /**
        INSERT .. SELECT ... SKIP LOCKED is unlikely to have the same
        rows locked on the replica.
        primary key.
@@ -2042,8 +2051,7 @@ public:
     @retval nonzero if the statement is a row injection
   */
   inline bool is_stmt_row_injection() const {
-    return binlog_stmt_flags &
-      (1U << (BINLOG_STMT_UNSAFE_COUNT + BINLOG_STMT_TYPE_ROW_INJECTION));
+    return binlog_stmt_flags & (1U << BINLOG_STMT_TYPE_ROW_INJECTION);
   }
 
   /**
@@ -2053,8 +2061,7 @@ public:
   */
   inline void set_stmt_row_injection() {
     DBUG_ENTER("set_stmt_row_injection");
-    binlog_stmt_flags|=
-      (1U << (BINLOG_STMT_UNSAFE_COUNT + BINLOG_STMT_TYPE_ROW_INJECTION));
+    binlog_stmt_flags|= (1U << BINLOG_STMT_TYPE_ROW_INJECTION);
     DBUG_VOID_RETURN;
   }
 
@@ -2330,7 +2337,7 @@ private:
       The statement is a row injection (i.e., either a BINLOG
       statement or a row event executed by the slave SQL thread).
     */
-    BINLOG_STMT_TYPE_ROW_INJECTION = 0,
+    BINLOG_STMT_TYPE_ROW_INJECTION = BINLOG_STMT_UNSAFE_COUNT,
 
     /** The last element of this enumeration type. */
     BINLOG_STMT_TYPE_COUNT
@@ -2344,8 +2351,8 @@ private:
     - The low BINLOG_STMT_UNSAFE_COUNT bits indicate the types of
       unsafeness that the current statement has.
 
-    - The next BINLOG_STMT_TYPE_COUNT bits indicate if the statement
-      is of some special type.
+      - The next BINLOG_STMT_TYPE_COUNT-BINLOG_STMT_TYPE_COUNT bits indicate if
+      the statement is of some special type.
 
     This must be a member of LEX, not of THD: each stored procedure
     needs to remember its unsafeness state between calls and each
@@ -2420,13 +2427,9 @@ class Lex_input_stream
                   const char *str, const char *end, int sep);
   my_charset_conv_wc_mb get_escape_func(THD *thd, my_wc_t sep) const;
 public:
-  Lex_input_stream()
-  {
-  }
+  Lex_input_stream() = default;
 
-  ~Lex_input_stream()
-  {
-  }
+  ~Lex_input_stream() = default;
 
   /**
      Object initializer. Must be called before usage.
@@ -3009,7 +3012,7 @@ public:
 protected:
   bool save_explain_data_intern(MEM_ROOT *mem_root, Explain_update *eu, bool is_analyze);
 public:
-  virtual ~Update_plan() {}
+  virtual ~Update_plan() = default;
 
   Update_plan(MEM_ROOT *mem_root_arg) : 
     impossible_where(false), no_partitions(false), 
@@ -3063,7 +3066,7 @@ enum password_exp_type
 
 struct Account_options: public USER_RESOURCES
 {
-  Account_options() { }
+  Account_options() = default;
 
   void reset()
   {
@@ -3306,6 +3309,12 @@ public:
   List<Name_resolution_context> context_stack;
   SELECT_LEX *select_stack[MAX_SELECT_NESTING + 1];
   uint select_stack_top;
+  /*
+    Usually this is set to 0, but for INSERT/REPLACE SELECT it is set to 1.
+    When parsing such statements the pointer to the most outer select is placed
+    into the second element of select_stack rather than into the first.
+  */
+  uint select_stack_outer_barrier;
 
   SQL_I_List<ORDER> proc_list;
   SQL_I_List<TABLE_LIST> auxiliary_table_list, save_list;
@@ -3440,7 +3449,7 @@ public:
     stores total number of tables. For LEX representing multi-delete
     holds number of tables from which we will delete records.
   */
-  uint table_count;
+  uint table_count_update;
 
   uint8 describe;
   /*
@@ -3553,13 +3562,13 @@ public:
   }
 
 
-  SQL_I_List<ORDER> save_group_list;
-  SQL_I_List<ORDER> save_order_list;
   LEX_CSTRING *win_ref;
   Window_frame *win_frame;
   Window_frame_bound *frame_top_bound;
   Window_frame_bound *frame_bottom_bound;
   Window_spec *win_spec;
+
+  Item *upd_del_where;
 
   /* System Versioning */
   vers_select_conds_t vers_conditions;
@@ -3749,6 +3758,17 @@ public:
 
   bool copy_db_to(LEX_CSTRING *to);
 
+  void inc_select_stack_outer_barrier()
+  {
+    select_stack_outer_barrier++;
+  }
+
+  SELECT_LEX *parser_current_outer_select()
+  {
+    return select_stack_top - 1 == select_stack_outer_barrier ?
+             0 : select_stack[select_stack_top - 2];
+  }
+
   Name_resolution_context *current_context()
   {
     return context_stack.head();
@@ -3765,8 +3785,10 @@ public:
   bool table_or_sp_used();
 
   bool is_partition_management() const;
+#ifdef WITH_PARTITION_STORAGE_ENGINE
   bool part_values_current(THD *thd);
   bool part_values_history(THD *thd);
+#endif
 
   /**
     @brief check if the statement is a single-level join
@@ -3793,7 +3815,7 @@ public:
 
   int print_explain(select_result_sink *output, uint8 explain_flags,
                     bool is_analyze, bool *printed_anything);
-  void restore_set_statement_var();
+  bool restore_set_statement_var();
 
   void init_last_field(Column_definition *field, const LEX_CSTRING *name,
                        const CHARSET_INFO *cs);
@@ -3861,6 +3883,10 @@ public:
   bool call_statement_start(THD *thd, const Lex_ident_sys_st *name);
   bool call_statement_start(THD *thd, const Lex_ident_sys_st *name1,
                                       const Lex_ident_sys_st *name2);
+  bool call_statement_start(THD *thd,
+                            const Lex_ident_sys_st *db,
+                            const Lex_ident_sys_st *pkg,
+                            const Lex_ident_sys_st *proc);
   sp_variable *find_variable(const LEX_CSTRING *name,
                              sp_pcontext **ctx,
                              const Sp_rcontext_handler **rh) const;
@@ -4105,6 +4131,11 @@ public:
   Item *make_item_func_sysdate(THD *thd, uint fsp);
   Item *make_item_func_call_generic(THD *thd, Lex_ident_cli_st *db,
                                     Lex_ident_cli_st *name, List<Item> *args);
+  Item *make_item_func_call_generic(THD *thd,
+                                    Lex_ident_cli_st *db,
+                                    Lex_ident_cli_st *pkg,
+                                    Lex_ident_cli_st *name,
+                                    List<Item> *args);
   Item *make_item_func_call_native_or_parse_error(THD *thd,
                                                   Lex_ident_cli_st &name,
                                                   List<Item> *args);
@@ -4372,7 +4403,7 @@ public:
                       bool if_not_exists)
   {
     constr->name= name;
-    constr->flags= if_not_exists ? VCOL_CHECK_CONSTRAINT_IF_NOT_EXISTS : 0;
+    constr->if_not_exists= if_not_exists;
     alter_info.check_constraint_list.push_back(constr);
     return false;
   }
@@ -4518,8 +4549,36 @@ public:
     return create_info.vers_info;
   }
 
+  /* The list of history-generating DML commands */
+  bool vers_history_generating() const
+  {
+    switch (sql_command)
+    {
+      case SQLCOM_DELETE:
+        return !vers_conditions.delete_history;
+      case SQLCOM_UPDATE:
+      case SQLCOM_UPDATE_MULTI:
+      case SQLCOM_DELETE_MULTI:
+      case SQLCOM_REPLACE:
+      case SQLCOM_REPLACE_SELECT:
+        return true;
+      case SQLCOM_INSERT:
+      case SQLCOM_INSERT_SELECT:
+        return duplicates == DUP_UPDATE;
+      case SQLCOM_LOAD:
+        return duplicates == DUP_REPLACE;
+      default:
+        return false;
+    }
+  }
+
   int add_period(Lex_ident name, Lex_ident_sys_st start, Lex_ident_sys_st end)
   {
+    if (check_period_name(name.str)) {
+      my_error(ER_WRONG_COLUMN_NAME, MYF(0), name.str);
+      return 1;
+    }
+
     if (lex_string_cmp(system_charset_info, &start, &end) == 0)
     {
       my_error(ER_FIELD_SPECIFIED_TWICE, MYF(0), start.str);
@@ -4748,8 +4807,8 @@ public:
                               const LEX_CSTRING *constraint_name,
                               Table_ident *ref_table_name,
                               DDL_options ddl_options);
+
   bool check_dependencies_in_with_clauses();
-  bool resolve_references_to_cte_in_hanging_cte();
   bool check_cte_dependencies_and_resolve_references();
   bool resolve_references_to_cte(TABLE_LIST *tables,
                                  TABLE_LIST **tables_last);
@@ -4779,14 +4838,13 @@ class Set_signal_information
 {
 public:
   /** Empty default constructor, use clear() */
- Set_signal_information() {} 
+ Set_signal_information() = default; 
 
   /** Copy constructor. */
   Set_signal_information(const Set_signal_information& set);
 
   /** Destructor. */
-  ~Set_signal_information()
-  {}
+  ~Set_signal_information() = default;
 
   /** Clear all items. */
   void clear();
@@ -4909,8 +4967,7 @@ public:
     return m_lip.init(thd, buff, length);
   }
 
-  ~Parser_state()
-  {}
+  ~Parser_state() = default;
 
   Lex_input_stream m_lip;
   Yacc_state m_yacc;

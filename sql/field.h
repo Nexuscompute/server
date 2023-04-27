@@ -519,6 +519,8 @@ enum enum_vcol_info_type
   VCOL_DEFAULT, VCOL_CHECK_FIELD, VCOL_CHECK_TABLE,
   VCOL_USING_HASH,
   /* Additional types should be added here */
+
+  VCOL_GENERATED_VIRTUAL_INDEXED, // this is never written in .frm
   /* Following is the highest value last   */
   VCOL_TYPE_NONE = 127 // Since the 0 value is already in use
 };
@@ -528,6 +530,7 @@ static inline const char *vcol_type_name(enum_vcol_info_type type)
   switch (type)
   {
   case VCOL_GENERATED_VIRTUAL:
+  case VCOL_GENERATED_VIRTUAL_INDEXED:
   case VCOL_GENERATED_STORED:
     return "GENERATED ALWAYS AS";
   case VCOL_DEFAULT:
@@ -551,11 +554,10 @@ static inline const char *vcol_type_name(enum_vcol_info_type type)
 #define VCOL_FIELD_REF         1
 #define VCOL_NON_DETERMINISTIC 2
 #define VCOL_SESSION_FUNC      4  /* uses session data, e.g. USER or DAYNAME */
-#define VCOL_TIME_FUNC         8
+#define VCOL_TIME_FUNC         8  /* safe for SBR */
 #define VCOL_AUTO_INC         16
 #define VCOL_IMPOSSIBLE       32
-#define VCOL_NOT_VIRTUAL      64  /* Function can't be virtual */
-#define VCOL_CHECK_CONSTRAINT_IF_NOT_EXISTS 128
+#define VCOL_NEXTVAL          64  /* NEXTVAL is not implemented for vcols */
 
 #define VCOL_NOT_STRICTLY_DETERMINISTIC                       \
   (VCOL_NON_DETERMINISTIC | VCOL_TIME_FUNC | VCOL_SESSION_FUNC)
@@ -587,6 +589,7 @@ public:
   bool stored_in_db;
   bool utf8;                                    /* Already in utf8 */
   bool automatic_name;
+  bool if_not_exists;
   Item *expr;
   Lex_ident name;                               /* Name of constraint */
   /* see VCOL_* (VCOL_FIELD_REF, ...) */
@@ -602,7 +605,7 @@ public:
     name.length= 0;
   };
   Virtual_column_info* clone(THD *thd);
-  ~Virtual_column_info() {};
+  ~Virtual_column_info() = default;
   enum_vcol_info_type get_vcol_type() const
   {
     return vcol_type;
@@ -638,6 +641,14 @@ public:
   {
     in_partitioning_expr= TRUE;
   }
+  bool need_refix() const
+  {
+    return flags & VCOL_SESSION_FUNC;
+  }
+  bool fix_expr(THD *thd);
+  bool fix_session_expr(THD *thd);
+  bool cleanup_session_expr();
+  bool fix_and_check_expr(THD *thd, TABLE *table);
   inline bool is_equal(const Virtual_column_info* vcol) const;
   inline void print(String*);
 };
@@ -884,7 +895,7 @@ public:
   Field(uchar *ptr_arg,uint32 length_arg,uchar *null_ptr_arg,
         uchar null_bit_arg, utype unireg_check_arg,
         const LEX_CSTRING *field_name_arg);
-  virtual ~Field() {}
+  virtual ~Field() = default;
 
   virtual Type_numeric_attributes type_numeric_attributes() const
   {
@@ -896,6 +907,12 @@ public:
   }
 
   bool is_unsigned() const { return flags & UNSIGNED_FLAG; }
+
+  bool check_assignability_from(const Type_handler *from, bool ignore) const;
+  bool check_assignability_from(const Field *from, bool ignore) const
+  {
+    return check_assignability_from(from->type_handler(), ignore);
+  }
 
   /**
     Convenience definition of a copy function returned by
@@ -1284,7 +1301,7 @@ public:
     Currently it's only used in partitioning.
   */
   virtual int cmp_prefix(const uchar *a, const uchar *b,
-                         size_t prefix_len) const
+                         size_t prefix_char_len) const
   { return cmp(a, b); }
   virtual int cmp(const uchar *,const uchar *) const=0;
   virtual int cmp_binary(const uchar *a,const uchar *b, uint32 max_length=~0U) const
@@ -1761,12 +1778,6 @@ public:
     Used by the ALTER TABLE
   */
   virtual bool is_equal(const Column_definition &new_field) const= 0;
-  // Used as double dispatch pattern: calls virtual method of handler
-  virtual bool
-  can_be_converted_by_engine(const Column_definition &new_type) const
-  {
-    return false;
-  }
   /* convert decimal to longlong with overflow check */
   longlong convert_decimal2longlong(const my_decimal *val, bool unsigned_flag,
                                     int *err);
@@ -1834,7 +1845,14 @@ public:
   key_map get_possible_keys();
 
   /* Hash value */
-  virtual void hash(ulong *nr, ulong *nr2);
+  void hash(Hasher *hasher)
+  {
+    if (is_null())
+      hasher->add_null();
+    else
+      hash_not_null(hasher);
+  }
+  virtual void hash_not_null(Hasher *hasher);
 
   /**
     Get the upper limit of the MySQL integral and floating-point type.
@@ -4029,12 +4047,7 @@ public:
                    NONE, field_name_arg, collation),
      can_alter_field_type(1) {};
 
-  const Type_handler *type_handler() const override
-  {
-    if (is_var_string())
-      return &type_handler_var_string;
-    return &type_handler_string;
-  }
+  const Type_handler *type_handler() const override;
   enum ha_base_keytype key_type() const override
     { return binary() ? HA_KEYTYPE_BINARY : HA_KEYTYPE_TEXT; }
   en_fieldtype tmp_engine_column_type(bool use_packed_rows) const override;
@@ -4061,11 +4074,6 @@ public:
   void sql_type(String &str) const override;
   void sql_rpl_type(String*) const override;
   bool is_equal(const Column_definition &new_field) const override;
-  bool can_be_converted_by_engine(const Column_definition &new_type) const
-    override
-  {
-    return table->file->can_convert_string(this, new_type);
-  }
   uchar *pack(uchar *to, const uchar *from, uint max_length) override;
   const uchar *unpack(uchar* to, const uchar *from, const uchar *from_end,
                       uint param_data) override;
@@ -4153,8 +4161,7 @@ public:
     share->varchar_fields++;
   }
 
-  const Type_handler *type_handler() const override
-  { return &type_handler_varchar; }
+  const Type_handler *type_handler() const override;
   en_fieldtype tmp_engine_column_type(bool use_packed_rows) const override
   {
     return FIELD_VARCHAR;
@@ -4194,7 +4201,7 @@ public:
   my_decimal *val_decimal(my_decimal *) override;
   bool send(Protocol *protocol) override;
   int cmp(const uchar *a,const uchar *b) const override;
-  int cmp_prefix(const uchar *a, const uchar *b, size_t prefix_len) const
+  int cmp_prefix(const uchar *a, const uchar *b, size_t prefix_char_len) const
     override;
   void sort_string(uchar *buff,uint length) override;
   uint get_key_image(uchar *buff, uint length,
@@ -4221,12 +4228,7 @@ public:
                        uchar *new_ptr, uint32 length,
                        uchar *new_null_ptr, uint new_null_bit) override;
   bool is_equal(const Column_definition &new_field) const override;
-  bool can_be_converted_by_engine(const Column_definition &new_type) const
-    override
-  {
-    return table->file->can_convert_varstring(this, new_type);
-  }
-  void hash(ulong *nr, ulong *nr2) override;
+  void hash_not_null(Hasher *hasher) override;
   uint length_size() const override { return length_bytes; }
   void print_key_value(String *out, uint32 length) override;
   Binlog_type_info binlog_type_info() const override;
@@ -4486,12 +4488,13 @@ public:
   bool make_empty_rec_store_default_value(THD *thd, Item *item) override;
   int store(const char *to, size_t length, CHARSET_INFO *charset) override;
   using Field_str::store;
+  void hash_not_null(Hasher *hasher) override;
   double val_real() override;
   longlong val_int() override;
   String *val_str(String *, String *) override;
   my_decimal *val_decimal(my_decimal *) override;
   int cmp(const uchar *a, const uchar *b) const override;
-  int cmp_prefix(const uchar *a, const uchar *b, size_t prefix_len) const
+  int cmp_prefix(const uchar *a, const uchar *b, size_t prefix_char_len) const
     override;
   int cmp(const uchar *a, uint32 a_length, const uchar *b, uint32 b_length)
     const;
@@ -4664,11 +4667,6 @@ public:
   uint32 char_length() const override;
   uint32 character_octet_length() const override;
   bool is_equal(const Column_definition &new_field) const override;
-  bool can_be_converted_by_engine(const Column_definition &new_type) const
-    override
-  {
-    return table->file->can_convert_blob(this, new_type);
-  }
   void print_key_value(String *out, uint32 length) override;
   Binlog_type_info binlog_type_info() const override;
 
@@ -4738,6 +4736,8 @@ private:
 class Field_enum :public Field_str {
   static void do_field_enum(Copy_field *copy_field);
   longlong val_int(const uchar *) const;
+  bool can_optimize_range_or_keypart_ref(const Item_bool_func *cond,
+                                         const Item *item) const;
 protected:
   uint packlength;
 public:
@@ -4830,9 +4830,12 @@ public:
                       uint param_data) override;
 
   bool can_optimize_keypart_ref(const Item_bool_func *cond,
-                                const Item *item) const override;
-  bool can_optimize_group_min_max(const Item_bool_func *, const Item *)
-    const override
+                                const Item *item) const override
+  {
+    return can_optimize_range_or_keypart_ref(cond, item);
+  }
+  bool can_optimize_group_min_max(const Item_bool_func *cond,
+                                  const Item *const_item) const override
   {
     /*
       Can't use GROUP_MIN_MAX optimization for ENUM and SET,
@@ -4845,7 +4848,10 @@ public:
   }
   bool can_optimize_range(const Item_bool_func *cond,
                           const Item *item,
-                          bool is_eq_func) const override;
+                          bool is_eq_func) const override
+  {
+    return can_optimize_range_or_keypart_ref(cond, item);
+  }
   Binlog_type_info binlog_type_info() const override;
 private:
   bool is_equal(const Column_definition &new_field) const override;
@@ -4967,7 +4973,7 @@ public:
   int cmp_binary_offset(uint row_offset) override
   { return cmp_offset(row_offset); }
   int cmp_prefix(const uchar *a, const uchar *b,
-                 size_t  max_length) const override;
+                 size_t  prefix_char_length) const override;
   int key_cmp(const uchar *a, const uchar *b) const override
   { return cmp_binary((uchar *) a, (uchar *) b); }
   int key_cmp(const uchar *str, uint length) const override;
@@ -5053,7 +5059,7 @@ public:
     if (bit_ptr)
       bit_ptr= ADD_TO_PTR(bit_ptr, ptr_diff, uchar*);
   }
-  void hash(ulong *nr, ulong *nr2) override;
+  void hash_not_null(Hasher *hasher) override;
 
   SEL_ARG *get_mm_leaf(RANGE_OPT_PARAM *param, KEY_PART *key_part,
                        const Item_bool_func *cond,
@@ -5265,7 +5271,7 @@ public:
   uint  flags, pack_length;
   List<String> interval_list;
   engine_option_value *option_list;
-
+  bool explicitly_nullable;
 
   /*
     This is additinal data provided for any computed(virtual) field.
@@ -5287,7 +5293,7 @@ public:
     comment(null_clex_str),
     on_update(NULL), invisible(VISIBLE), char_length(0),
     flags(0), pack_length(0),
-    option_list(NULL),
+    option_list(NULL), explicitly_nullable(false),
     vcol_info(0), default_value(0), check_constraint(0),
     versioning(VERSIONING_NOT_SET), period(NULL)
   {
@@ -5451,7 +5457,7 @@ public:
     Record_addr addr(true);
     return make_field(share, mem_root, &addr, field_name_arg);
   }
-  /* Return true if default is an expression that must be saved explicitely */
+  /* Return true if default is an expression that must be saved explicitly */
   bool has_default_expression();
 
   bool has_default_now_unireg_check() const
@@ -5664,7 +5670,7 @@ inline bool Row_definition_list::eq_name(const Spvar_definition *def,
 class Create_field :public Column_definition
 {
 public:
-  LEX_CSTRING change;			// If done with alter table
+  LEX_CSTRING change;			// Old column name if column is renamed by ALTER
   LEX_CSTRING after;			// Put column after this one
   Field *field;				// For alter table
   const TYPELIB *save_interval;         // Temporary copy for the above
@@ -5693,6 +5699,12 @@ public:
   }
   /* Used to make a clone of this object for ALTER/CREATE TABLE */
   Create_field *clone(MEM_ROOT *mem_root) const;
+  static void upgrade_data_types(List<Create_field> &list)
+  {
+    List_iterator<Create_field> it(list);
+    while (Create_field *f= it++)
+      f->type_handler()->Column_definition_implicit_upgrade(f);
+  }
 };
 
 
@@ -5830,8 +5842,8 @@ public:
   Field *from_field,*to_field;
   String tmp;					// For items
 
-  Copy_field() {}
-  ~Copy_field() {}
+  Copy_field() = default;
+  ~Copy_field() = default;
   void set(Field *to,Field *from,bool save);	// Field to field 
   void set(uchar *to,Field *from);		// Field to string
   void (*do_copy)(Copy_field *);

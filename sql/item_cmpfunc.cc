@@ -35,6 +35,7 @@
 
 #define PCRE2_STATIC 1             /* Important on Windows */
 #include "pcre2.h"                 /* pcre2 header file */
+#include "my_json_writer.h"
 
 /*
   Compare row signature of two expressions
@@ -318,7 +319,18 @@ static bool convert_const_to_int(THD *thd, Item_field *field_item,
       field_item->field_type() != MYSQL_TYPE_YEAR)
     return 1;
 
-  if ((*item)->can_eval_in_optimize())
+  /*
+    Replace (*item) with its value if the item can be computed.
+
+    Do not replace items that contain aggregate functions:
+    There can be such items that are constants, e.g. COLLATION(AVG(123)),
+    but this function is called at Name Resolution phase.
+    Removing aggregate functions may confuse query plan generation code, e.g.
+    the optimizer might conclude that the query doesn't need to do grouping
+    at all.
+  */
+  if ((*item)->can_eval_in_optimize() &&
+      !(*item)->with_sum_func())
   {
     TABLE *table= field->table;
     MY_BITMAP *old_maps[2] = { NULL, NULL };
@@ -780,7 +792,9 @@ int Arg_comparator::compare_e_string()
 {
   String *res1,*res2;
   res1= (*a)->val_str(&value1);
+  DBUG_ASSERT((res1 == NULL) == (*a)->null_value);
   res2= (*b)->val_str(&value2);
+  DBUG_ASSERT((res2 == NULL) == (*b)->null_value);
   if (!res1 || !res2)
     return MY_TEST(res1 == res2);
   return MY_TEST(sortcmp(res1, res2, compare_collation()) == 0);
@@ -4332,6 +4346,56 @@ Item_func_in::fix_fields(THD *thd, Item **ref)
 }
 
 
+Item *Item_func_in::in_predicate_to_equality_transformer(THD *thd, uchar *arg)
+{
+  if (!array || have_null || !all_items_are_consts(args + 1, arg_count - 1))
+    return this; /* Transformation is not applicable */
+
+  /*
+    If all elements in the array of constant values are equal and there are
+    no NULLs in the list then clause
+    -  "a IN (e1,..,en)" can be converted to "a = e1"
+    -  "a NOT IN (e1,..,en)" can be converted to "a != e1".
+    This means an object of Item_func_in can be replaced with an object of
+    Item_func_eq for IN (e1,..,en) clause or Item_func_ne for
+    NOT IN (e1,...,en).
+  */
+
+  /*
+    Since the array is sorted it's enough to compare the first and the last
+    elements to tell whether all elements are equal
+  */
+  if (array->compare_elems(0, array->used_count - 1))
+  {
+    /* Not all elements are equal, transformation is not possible */
+    return this;
+  }
+
+  Json_writer_object trace_wrapper(thd);
+  trace_wrapper.add("transformation", "in_predicate_to_equality")
+               .add("before", this);
+
+  Item *new_item= nullptr;
+  if (negated)
+    new_item= new (thd->mem_root) Item_func_ne(thd, args[0], args[1]);
+  else
+    new_item= new (thd->mem_root) Item_func_eq(thd, args[0], args[1]);
+  if (new_item)
+  {
+    new_item->set_name(thd, name);
+    if (new_item->fix_fields(thd, &new_item))
+    {
+      /*
+        If there are any problems during fixing fields, there is no need to
+        return an error, just discard the transformation
+      */
+      new_item= this;
+    }
+  }
+  trace_wrapper.add("after", new_item);
+  return new_item;
+}
+
 bool
 Item_func_in::eval_not_null_tables(void *opt_arg)
 {
@@ -4711,10 +4775,11 @@ void Item_func_in::mark_as_condition_AND_part(TABLE_LIST *embedding)
   Query_arena *arena, backup;
   arena= thd->activate_stmt_arena_if_needed(&backup);
 
-  if (to_be_transformed_into_in_subq(thd))
+  if (!transform_into_subq_checked)
   {
-    transform_into_subq= true;
-    thd->lex->current_select->in_funcs.push_back(this, thd->mem_root);
+    if ((transform_into_subq= to_be_transformed_into_in_subq(thd)))
+      thd->lex->current_select->in_funcs.push_back(this, thd->mem_root);
+    transform_into_subq_checked= true;
   }
 
   if (arena)
@@ -4849,38 +4914,18 @@ Item_cond::fix_fields(THD *thd, Item **ref)
 
   if (check_stack_overrun(thd, STACK_MIN_SIZE, buff))
     return TRUE;				// Fatal error flag is set!
-  /*
-    The following optimization reduces the depth of an AND-OR tree.
-    E.g. a WHERE clause like
-      F1 AND (F2 AND (F2 AND F4))
-    is parsed into a tree with the same nested structure as defined
-    by braces. This optimization will transform such tree into
-      AND (F1, F2, F3, F4).
-    Trees of OR items are flattened as well:
-      ((F1 OR F2) OR (F3 OR F4))   =>   OR (F1, F2, F3, F4)
-    Items for removed AND/OR levels will dangle until the death of the
-    entire statement.
-    The optimization is currently prepared statements and stored procedures
-    friendly as it doesn't allocate any memory and its effects are durable
-    (i.e. do not depend on PS/SP arguments).
-  */
-  while ((item=li++))
+
+  while (li++)
   {
-    while (item->type() == Item::COND_ITEM &&
-	   ((Item_cond*) item)->functype() == functype() &&
-           !((Item_cond*) item)->list.is_empty())
-    {						// Identical function
-      li.replace(((Item_cond*) item)->list);
-      ((Item_cond*) item)->list.empty();
-      item= *li.ref();				// new current item
-    }
+    merge_sub_condition(li);
+    item= *li.ref();
     if (is_top_level_item())
       item->top_level_item();
 
     /*
       replace degraded condition:
         was:    <field>
-        become: <field> = 1
+        become: <field> != 0
     */
     Item::Type type= item->type();
     if (type == Item::FIELD_ITEM || type == Item::REF_ITEM)
@@ -4896,7 +4941,9 @@ Item_cond::fix_fields(THD *thd, Item **ref)
 
     if (item->fix_fields_if_needed_for_bool(thd, li.ref()))
       return TRUE; /* purecov: inspected */
-    item= *li.ref(); // item can be substituted in fix_fields
+    merge_sub_condition(li);
+    item= *li.ref(); // may be substituted in fix_fields/merge_item_if_possible
+
     used_tables_cache|=     item->used_tables();
     if (item->can_eval_in_optimize() && !item->with_sp_var() &&
         !cond_has_datetime_is_null(item))
@@ -4941,6 +4988,55 @@ Item_cond::fix_fields(THD *thd, Item **ref)
     return TRUE;
   base_flags|= item_base_t::FIXED;
   return FALSE;
+}
+
+/**
+  @brief
+  Merge a lower-level condition pointed by the iterator into this Item_cond
+  if possible
+
+  @param li         list iterator pointing to condition that must be
+                    examined and merged if possible.
+
+  @details
+  If an item pointed by the iterator is an instance of Item_cond with the
+  same functype() as this Item_cond (i.e. both are Item_cond_and or both are
+  Item_cond_or) then the arguments of that lower-level item can be merged
+  into the list of arguments of this upper-level Item_cond.
+
+  This optimization reduces the depth of an AND-OR tree.
+  E.g. a WHERE clause like
+    F1 AND (F2 AND (F2 AND F4))
+  is parsed into a tree with the same nested structure as defined
+  by braces. This optimization will transform such tree into
+    AND (F1, F2, F3, F4).
+  Trees of OR items are flattened as well:
+    ((F1 OR F2) OR (F3 OR F4))   =>   OR (F1, F2, F3, F4)
+  Items for removed AND/OR levels will dangle until the death of the
+  entire statement.
+
+  The optimization is currently prepared statements and stored procedures
+  friendly as it doesn't allocate any memory and its effects are durable
+  (i.e. do not depend on PS/SP arguments).
+*/
+void Item_cond::merge_sub_condition(List_iterator<Item>& li)
+{
+  Item *item= *li.ref();
+
+  /*
+    The check for list.is_empty() is to catch empty Item_cond_and() items.
+    We may encounter Item_cond_and with an empty list, because optimizer code
+    strips multiple equalities, combines items, then adds multiple equalities
+    back
+  */
+  while (item->type() == Item::COND_ITEM &&
+         ((Item_cond*) item)->functype() == functype() &&
+         !((Item_cond*) item)->list.is_empty())
+  {
+    li.replace(((Item_cond*) item)->list);
+    ((Item_cond*) item)->list.empty();
+    item= *li.ref();
+  }
 }
 
 
@@ -5127,7 +5223,8 @@ bool Item_cond::walk(Item_processor processor, bool walk_subquery, void *arg)
     Item returned as the result of transformation of the root node 
 */
 
-Item *Item_cond::transform(THD *thd, Item_transformer transformer, uchar *arg)
+Item *Item_cond::do_transform(THD *thd, Item_transformer transformer, uchar *arg,
+                              bool toplevel)
 {
   DBUG_ASSERT(!thd->stmt_arena->is_stmt_prepare());
 
@@ -5135,7 +5232,8 @@ Item *Item_cond::transform(THD *thd, Item_transformer transformer, uchar *arg)
   Item *item;
   while ((item= li++))
   {
-    Item *new_item= item->transform(thd, transformer, arg);
+    Item *new_item= toplevel ? item->top_level_transform(thd, transformer, arg)
+                             : item->transform(thd, transformer, arg);
     if (!new_item)
       return 0;
 
@@ -5145,7 +5243,9 @@ Item *Item_cond::transform(THD *thd, Item_transformer transformer, uchar *arg)
       Otherwise we'll be allocating a lot of unnecessary memory for
       change records at each execution.
     */
-    if (new_item != item)
+    if (toplevel)
+      *li.ref()= new_item;
+    else if (new_item != item)
       thd->change_item_tree(li.ref(), new_item);
   }
   return Item_func::transform(thd, transformer, arg);
@@ -5176,8 +5276,8 @@ Item *Item_cond::transform(THD *thd, Item_transformer transformer, uchar *arg)
     Item returned as the result of transformation of the root node 
 */
 
-Item *Item_cond::compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
-                         Item_transformer transformer, uchar *arg_t)
+Item *Item_cond::do_compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
+                      Item_transformer transformer, uchar *arg_t, bool toplevel)
 {
   if (!(this->*analyzer)(arg_p))
     return 0;
@@ -5192,7 +5292,11 @@ Item *Item_cond::compile(THD *thd, Item_analyzer analyzer, uchar **arg_p,
     */   
     uchar *arg_v= *arg_p;
     Item *new_item= item->compile(thd, analyzer, &arg_v, transformer, arg_t);
-    if (new_item && new_item != item)
+    if (!new_item || new_item == item)
+      continue;
+    if (toplevel)
+      *li.ref()= new_item;
+    else
       thd->change_item_tree(li.ref(), new_item);
   }
   return Item_func::transform(thd, transformer, arg_t);
@@ -7667,7 +7771,17 @@ bool Item_equal::create_pushable_equalities(THD *thd,
     if (!eq ||  equalities->push_back(eq, thd->mem_root))
       return true;
     if (!clone_const)
-      right_item->set_extraction_flag(MARKER_IMMUTABLE);
+    {
+      /*
+        Also set IMMUTABLE_FL for any sub-items of the right_item.
+        This is needed to prevent Item::cleanup_excluding_immutables_processor
+        from peforming cleanup of the sub-items and so creating an item tree
+        where a fixed item has non-fixed items inside it.
+      */
+      int16 new_flag= MARKER_IMMUTABLE;
+      right_item->walk(&Item::set_extraction_flag_processor, false,
+                       (void*)&new_flag);
+    }
   }
 
   while ((item=it++))

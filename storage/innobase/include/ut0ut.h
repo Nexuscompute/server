@@ -323,7 +323,7 @@ class logger
 {
 protected:
   /* This class must not be used directly */
-  ATTRIBUTE_COLD ATTRIBUTE_NOINLINE logger() {}
+  ATTRIBUTE_COLD ATTRIBUTE_NOINLINE logger() = default;
 public:
   template<typename T> ATTRIBUTE_COLD ATTRIBUTE_NOINLINE
   logger& operator<<(const T& rhs)
@@ -438,7 +438,7 @@ private:
 
 } // namespace ib
 
-#include "ut0ut.ic"
+#include "ut0ut.inl"
 
 #endif
 

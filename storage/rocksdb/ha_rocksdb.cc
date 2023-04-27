@@ -266,7 +266,7 @@ Rdb_cf_manager cf_manager;
 Rdb_ddl_manager ddl_manager;
 Rdb_binlog_manager binlog_manager;
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__OpenBSD__)
 Rdb_io_watchdog *io_watchdog = nullptr;
 #endif
 /**
@@ -643,6 +643,8 @@ static my_bool rocksdb_large_prefix = 0;
 static my_bool rocksdb_allow_to_start_after_corruption = 0;
 static char* rocksdb_git_hash;
 
+uint32_t rocksdb_ignore_datadic_errors = 0;
+
 char *compression_types_val=
   const_cast<char*>(get_rocksdb_supported_compression_types());
 static unsigned long rocksdb_write_policy =
@@ -848,7 +850,7 @@ static void rocksdb_set_io_write_timeout(
     void *const var_ptr MY_ATTRIBUTE((__unused__)), const void *const save) {
   DBUG_ASSERT(save != nullptr);
   DBUG_ASSERT(rdb != nullptr);
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__OpenBSD__)
   DBUG_ASSERT(io_watchdog != nullptr);
 #endif
 
@@ -857,7 +859,7 @@ static void rocksdb_set_io_write_timeout(
   const uint32_t new_val = *static_cast<const uint32_t *>(save);
 
   rocksdb_io_write_timeout_secs = new_val;
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__OpenBSD__)
   io_watchdog->reset_timeout(rocksdb_io_write_timeout_secs);
 #endif
   RDB_MUTEX_UNLOCK_CHECK(rdb_sysvars_mutex);
@@ -1913,6 +1915,15 @@ static MYSQL_SYSVAR_UINT(
     nullptr, nullptr, 1 /* default value */, 0 /* min value */,
     2 /* max value */, 0);
 
+static MYSQL_SYSVAR_UINT(
+    ignore_datadic_errors, rocksdb_ignore_datadic_errors,
+    PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+    "Ignore MyRocks' data directory errors. "
+    "(CAUTION: Use only to start the server and perform repairs. Do NOT use "
+    "for regular operation)",
+    nullptr, nullptr, 0 /* default value */, 0 /* min value */,
+    1 /* max value */, 0);
+
 static MYSQL_SYSVAR_STR(datadir, rocksdb_datadir,
                         PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_READONLY,
                         "RocksDB data directory", nullptr, nullptr,
@@ -2148,6 +2159,8 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(rollback_on_timeout),
 
     MYSQL_SYSVAR(enable_insert_with_update_caching),
+
+    MYSQL_SYSVAR(ignore_datadic_errors),
     nullptr};
 
 static rocksdb::WriteOptions rdb_get_rocksdb_write_options(
@@ -2250,7 +2263,7 @@ static inline uint32_t rocksdb_perf_context_level(THD *const thd) {
 */
 
 interface Rdb_tx_list_walker {
-  virtual ~Rdb_tx_list_walker() {}
+  virtual ~Rdb_tx_list_walker() = default;
   virtual void process_tran(const Rdb_transaction *const) = 0;
 };
 
@@ -5223,6 +5236,13 @@ static int rocksdb_init_func(void *const p) {
 
   DBUG_ENTER_FUNC();
 
+  if (rocksdb_ignore_datadic_errors)
+  {
+    sql_print_information(
+        "CAUTION: Running with rocksdb_ignore_datadic_errors=1. "
+        " This should only be used to perform repairs");
+  }
+
   if (rdb_check_rocksdb_corruption()) {
     // NO_LINT_DEBUG
     sql_print_error(
@@ -5654,7 +5674,14 @@ static int rocksdb_init_func(void *const p) {
   if (ddl_manager.init(&dict_manager, &cf_manager, rocksdb_validate_tables)) {
     // NO_LINT_DEBUG
     sql_print_error("RocksDB: Failed to initialize DDL manager.");
-    DBUG_RETURN(HA_EXIT_FAILURE);
+
+    if (rocksdb_ignore_datadic_errors)
+    {
+      sql_print_error("RocksDB: rocksdb_ignore_datadic_errors=1, "
+                      "trying to continue");
+    }
+    else
+      DBUG_RETURN(HA_EXIT_FAILURE);
   }
 
   Rdb_sst_info::init(rdb);
@@ -5760,7 +5787,7 @@ static int rocksdb_init_func(void *const p) {
     directories.push_back(myrocks::rocksdb_wal_dir);
   }
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__OpenBSD__)
   io_watchdog = new Rdb_io_watchdog(std::move(directories));
   io_watchdog->reset_timeout(rocksdb_io_write_timeout_secs);
 #endif
@@ -5859,7 +5886,7 @@ static int rocksdb_done_func(void *const p) {
   delete commit_latency_stats;
   commit_latency_stats = nullptr;
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__OpenBSD__)
   delete io_watchdog;
   io_watchdog = nullptr;
 #endif
@@ -6719,6 +6746,26 @@ int ha_rocksdb::open(const char *const name, int mode, uint test_if_locked) {
              "dictionary");
     DBUG_RETURN(HA_ERR_ROCKSDB_INVALID_TABLE);
   }
+  if (m_tbl_def->m_key_count != table->s->keys + has_hidden_pk(table)? 1:0)
+  {
+    sql_print_error("MyRocks: DDL mismatch: .frm file has %u indexes, "
+                    "MyRocks has %u (%s hidden pk)",
+                    table->s->keys, m_tbl_def->m_key_count,
+                    has_hidden_pk(table)? "1" : "no");
+
+    if (rocksdb_ignore_datadic_errors)
+    {
+      sql_print_error("MyRocks: rocksdb_ignore_datadic_errors=1, "
+                      "trying to continue");
+    }
+    else
+    {
+      my_error(ER_INTERNAL_ERROR, MYF(0),
+               "MyRocks: DDL mismatch. Check the error log for details");
+      DBUG_RETURN(HA_ERR_ROCKSDB_INVALID_TABLE);
+    }
+  }
+
 
   m_lock_rows = RDB_LOCK_NONE;
   m_key_descr_arr = m_tbl_def->m_key_descr_arr;
@@ -7533,8 +7580,7 @@ int ha_rocksdb::create_key_def(const TABLE *const table_arg, const uint i,
     (*new_key_def)->m_ttl_column = ttl_column;
   }
   // initialize key_def
-  (*new_key_def)->setup(table_arg, tbl_def_arg);
-  DBUG_RETURN(HA_EXIT_SUCCESS);
+  DBUG_RETURN((*new_key_def)->setup(table_arg, tbl_def_arg));
 }
 
 int rdb_normalize_tablename(const std::string &tablename,
@@ -7670,7 +7716,7 @@ int rdb_split_normalized_tablename(const std::string &fullname,
  into MyRocks Data Dictionary
  The method is called during create table/partition, truncate table/partition
 
- @param table_name            IN      table's name formated as
+ @param table_name            IN      table's name formatted as
  'dbname.tablename'
  @param table_arg             IN      sql table
  @param auto_increment_value  IN      specified table's auto increment value
@@ -8442,8 +8488,7 @@ int ha_rocksdb::index_read_map_impl(uchar *const buf, const uchar *const key,
                                     const key_range *end_key) {
   DBUG_ENTER_FUNC();
 
-  DBUG_EXECUTE_IF("myrocks_busy_loop_on_row_read", int debug_i = 0;
-                  while (1) { debug_i++; });
+  DBUG_EXECUTE_IF("myrocks_busy_loop_on_row_read", my_sleep(50000););
 
   int rc = 0;
 
@@ -11618,6 +11663,12 @@ void Rdb_drop_index_thread::run() {
               "from cf id %u. MyRocks data dictionary may "
               "get corrupted.",
               d.cf_id);
+          if (rocksdb_ignore_datadic_errors)
+          {
+            sql_print_error("RocksDB: rocksdb_ignore_datadic_errors=1, "
+                            "trying to continue");
+            continue;
+          }
           abort();
         }
         rocksdb::ColumnFamilyHandle *cfh = cf_manager.get_cf(d.cf_id);
@@ -12107,7 +12158,6 @@ static int calculate_stats(
     }
   }
 
-  int num_sst = 0;
   for (const auto &it : props) {
     std::vector<Rdb_index_stats> sst_stats;
     Rdb_tbl_prop_coll::read_stats_from_tbl_props(it.second, &sst_stats);
@@ -12136,7 +12186,6 @@ static int calculate_stats(
       stats[it1.m_gl_index_id].merge(
           it1, true, it_index->second->max_storage_fmt_length());
     }
-    num_sst++;
   }
 
   if (include_memtables) {
@@ -13093,7 +13142,9 @@ bool ha_rocksdb::commit_inplace_alter_table(
 #define SHOW_FNAME(name) rocksdb_show_##name
 
 #define DEF_SHOW_FUNC(name, key)                                           \
-  static int SHOW_FNAME(name)(MYSQL_THD thd, SHOW_VAR * var, char *buff) { \
+  static int SHOW_FNAME(name)(MYSQL_THD thd, SHOW_VAR * var, void *buff,   \
+                              struct system_status_var *status_var,        \
+                              enum enum_var_type var_type) {               \
     rocksdb_status_counters.name =                                         \
         rocksdb_stats->getTickerCount(rocksdb::key);                       \
     var->type = SHOW_LONGLONG;                                             \
@@ -13102,7 +13153,7 @@ bool ha_rocksdb::commit_inplace_alter_table(
   }
 
 #define DEF_STATUS_VAR(name) \
-  { "rocksdb_" #name, (char *)&SHOW_FNAME(name), SHOW_FUNC }
+  SHOW_FUNC_ENTRY( "rocksdb_" #name, &SHOW_FNAME(name))
 
 #define DEF_STATUS_VAR_PTR(name, ptr, option) \
   { "rocksdb_" name, (char *)ptr, option }
@@ -13330,11 +13381,14 @@ static SHOW_VAR myrocks_status_variables[] = {
 
     {NullS, NullS, SHOW_LONG}};
 
-static void show_myrocks_vars(THD *thd, SHOW_VAR *var, char *buff) {
+static int show_myrocks_vars(THD *thd, SHOW_VAR *var, void *buff,
+                             struct system_status_var *,
+                             enum enum_var_type) {
   myrocks_update_status();
   myrocks_update_memory_status();
   var->type = SHOW_ARRAY;
   var->value = reinterpret_cast<char *>(&myrocks_status_variables);
+  return 0;
 }
 
 static ulonglong io_stall_prop_value(
@@ -13415,10 +13469,13 @@ static SHOW_VAR rocksdb_stall_status_variables[] = {
     // end of the array marker
     {NullS, NullS, SHOW_LONG}};
 
-static void show_rocksdb_stall_vars(THD *thd, SHOW_VAR *var, char *buff) {
+static int show_rocksdb_stall_vars(THD *thd, SHOW_VAR *var, void *buff,
+                                   struct system_status_var *,
+                                   enum enum_var_type) {
   update_rocksdb_stall_status();
   var->type = SHOW_ARRAY;
   var->value = reinterpret_cast<char *>(&rocksdb_stall_status_variables);
+  return 0;
 }
 
 static SHOW_VAR rocksdb_status_vars[] = {
@@ -13523,9 +13580,8 @@ static SHOW_VAR rocksdb_status_vars[] = {
     // the variables generated by SHOW_FUNC are sorted only by prefix (first
     // arg in the tuple below), so make sure it is unique to make sorting
     // deterministic as quick sort is not stable
-    {"rocksdb", reinterpret_cast<char *>(&show_myrocks_vars), SHOW_FUNC},
-    {"rocksdb_stall", reinterpret_cast<char *>(&show_rocksdb_stall_vars),
-     SHOW_FUNC},
+    SHOW_FUNC_ENTRY("rocksdb", &show_myrocks_vars),
+    SHOW_FUNC_ENTRY("rocksdb_stall", &show_rocksdb_stall_vars),
     {NullS, NullS, SHOW_LONG}};
 
 /*

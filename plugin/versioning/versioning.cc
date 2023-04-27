@@ -30,13 +30,14 @@ template <TR_table::field_id_t TRT_FIELD>
 class Create_func_trt : public Create_native_func
 {
 public:
-  virtual Item *create_native(THD *thd, LEX_CSTRING *name, List<Item> *item_list);
+  virtual Item *create_native(THD *thd, const LEX_CSTRING *name,
+                              List<Item> *item_list);
 
   static Create_func_trt<TRT_FIELD> s_singleton;
 
 protected:
-  Create_func_trt<TRT_FIELD>() {}
-  virtual ~Create_func_trt<TRT_FIELD>() {}
+  Create_func_trt<TRT_FIELD>() = default;
+  virtual ~Create_func_trt<TRT_FIELD>() = default;
 };
 
 template<TR_table::field_id_t TRT_FIELD>
@@ -44,7 +45,7 @@ Create_func_trt<TRT_FIELD> Create_func_trt<TRT_FIELD>::s_singleton;
 
 template <TR_table::field_id_t TRT_FIELD>
 Item*
-Create_func_trt<TRT_FIELD>::create_native(THD *thd, LEX_CSTRING *name,
+Create_func_trt<TRT_FIELD>::create_native(THD *thd, const LEX_CSTRING *name,
   List<Item> *item_list)
 {
   Item *func= NULL;
@@ -103,7 +104,8 @@ template <class Item_func_trt_trx_seesX>
 class Create_func_trt_trx_sees : public Create_native_func
 {
 public:
-  virtual Item *create_native(THD *thd, LEX_CSTRING *name, List<Item> *item_list)
+  virtual Item *create_native(THD *thd, const LEX_CSTRING *name,
+                              List<Item> *item_list)
   {
     Item *func= NULL;
     int arg_count= 0;
@@ -130,8 +132,8 @@ public:
   static Create_func_trt_trx_sees<Item_func_trt_trx_seesX> s_singleton;
 
 protected:
-  Create_func_trt_trx_sees<Item_func_trt_trx_seesX>() {}
-  virtual ~Create_func_trt_trx_sees<Item_func_trt_trx_seesX>() {}
+  Create_func_trt_trx_sees<Item_func_trt_trx_seesX>() = default;
+  virtual ~Create_func_trt_trx_sees<Item_func_trt_trx_seesX>() = default;
 };
 
 template<class X>

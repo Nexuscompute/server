@@ -351,24 +351,6 @@ bool mysql_derived_merge(THD *thd, LEX *lex, TABLE_LIST *derived)
     DBUG_RETURN(FALSE);
   }
 
-  if (dt_select->uncacheable & UNCACHEABLE_RAND)
-  {
-    /* There is random function => fall back to materialization. */
-    cause= "Random function in the select";
-    if (unlikely(thd->trace_started()))
-    {
-      OPT_TRACE_VIEWS_TRANSFORM(thd, trace_wrapper, trace_derived,
-                          derived->is_derived() ? "derived" : "view",
-                          derived->alias.str ? derived->alias.str : "<NULL>",
-                          derived->get_unit()->first_select()->select_number,
-                          "materialized");
-      trace_derived.add("cause", cause);
-    }
-    derived->change_refs_to_fields();
-    derived->set_materialized_derived();
-    DBUG_RETURN(FALSE);
-  }
-
   if (derived->dt_handler)
   {
     derived->change_refs_to_fields();
@@ -821,6 +803,9 @@ bool mysql_derived_prepare(THD *thd, LEX *lex, TABLE_LIST *derived)
         cursor->outer_join|= JOIN_TYPE_OUTER;
     }
   }
+  // Prevent it for possible ORDER BY clause
+  if (unit->fake_select_lex)
+    unit->fake_select_lex->context.outer_context= 0;
 
   if (unlikely(thd->trace_started()))
   {
@@ -1016,11 +1001,7 @@ bool mysql_derived_optimize(THD *thd, LEX *lex, TABLE_LIST *derived)
     /* Create an object for execution of the query specifying the table */
     if (!(derived->pushdown_derived=
             new (thd->mem_root) Pushdown_derived(derived, derived->dt_handler)))
-    {
-      delete derived->dt_handler;
-      derived->dt_handler= NULL;
       DBUG_RETURN(TRUE);
-    }
   }
 
   lex->current_select= first_select;
@@ -1245,7 +1226,6 @@ bool mysql_derived_fill(THD *thd, LEX *lex, TABLE_LIST *derived)
     /* Execute the query that specifies the derived table by a foreign engine */
     res= derived->pushdown_derived->execute();
     unit->executed= true;
-    delete derived->pushdown_derived;
       DBUG_RETURN(res);
   }
 

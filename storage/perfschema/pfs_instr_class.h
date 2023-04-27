@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2016, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -172,13 +172,13 @@ struct PFS_instr_class
 
   bool is_progress() const
   {
-    DBUG_ASSERT(m_type == PFS_CLASS_STAGE);
+    assert(m_type == PFS_CLASS_STAGE);
     return m_flags & PSI_FLAG_STAGE_PROGRESS;
   }
 
   bool is_shared_exclusive() const
   {
-    DBUG_ASSERT(m_type == PFS_CLASS_RWLOCK);
+    assert(m_type == PFS_CLASS_RWLOCK);
     return m_flags & PSI_RWLOCK_FLAG_SX;
   }
 
@@ -246,6 +246,9 @@ struct PFS_ALIGNED PFS_thread_class
   char m_name[PFS_MAX_INFO_NAME_LENGTH];
   /** Length in bytes of @c m_name. */
   uint m_name_length;
+  /** Instrument flags. */
+  int m_flags;
+  bool is_system_thread() const { return m_flags & PSI_FLAG_THREAD_SYSTEM; }
 };
 
 #define PFS_TABLESHARE_HASHKEY_SIZE (NAME_LEN + 1 + NAME_LEN + 1)

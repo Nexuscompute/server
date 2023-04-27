@@ -1,4 +1,4 @@
-/* Copyright (c) 2010, 2015, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2010, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -39,6 +39,11 @@
 
 THR_LOCK table_esgs_by_host_by_event_name::m_table_lock;
 
+PFS_engine_table_share_state
+table_esgs_by_host_by_event_name::m_share_state = {
+  false /* m_checked */
+};
+
 PFS_engine_table_share
 table_esgs_by_host_by_event_name::m_share=
 {
@@ -58,7 +63,9 @@ table_esgs_by_host_by_event_name::m_share=
                       "MIN_TIMER_WAIT BIGINT unsigned not null comment 'Minimum wait time of the timed summarized events.',"
                       "AVG_TIMER_WAIT BIGINT unsigned not null comment 'Average wait time of the timed summarized events.',"
                       "MAX_TIMER_WAIT BIGINT unsigned not null comment 'Maximum wait time of the timed summarized events.')") },
-  false  /* perpetual */
+  false, /* m_perpetual */
+  false, /* m_optional */
+  &m_share_state
 };
 
 PFS_engine_table*
@@ -184,7 +191,7 @@ int table_esgs_by_host_by_event_name
     return HA_ERR_RECORD_DELETED;
 
   /* Set the null bits */
-  DBUG_ASSERT(table->s->null_bytes == 1);
+  assert(table->s->null_bytes == 1);
   buf[0]= 0;
 
   for (; (f= *fields) ; fields++)

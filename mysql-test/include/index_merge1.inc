@@ -153,12 +153,22 @@ explain select * from t0 where
     (((key3 <7 and key7 < 6) or key5 < 2) and (key5 < 5 or key6 < 6));
 
 explain select * from t0 where
-    ((key3 <5 or key5 < 4) and (key1 < 4 or key2 < 4))
+    ((key3 < 4 or key5 < 4) and (key1 < 4 or key2 < 4))
   or
     ((key3 >=5 or key5 < 2) and (key5 < 5 or key6 < 6));
 
 explain select * from t0 force index(i1, i2, i3, i4, i5, i6 ) where
-    ((key3 <5 or key5 < 4) and (key1 < 4 or key2 < 4))
+    ((key3 < 4 or key5 < 4) and (key1 < 4 or key2 < 4))
+  or
+    ((key3 >=5 or key5 < 2) and (key5 < 5 or key6 < 6));
+
+explain select * from t0 force index(i1, i2, i3, i4, i5, i6 ) where
+    ((key3 < 5 or key5 < 4) and (key1 < 4 or key2 < 4))
+  or
+    ((key3 >=5 or key5 < 2) and (key5 < 5 or key6 < 6));
+
+explain select * from t0 force index(i1, i2, i3, i4, i5, i6 ) where
+    ((key3 < 10 or key5 < 4) and (key1 < 4 or key2 < 4))
   or
     ((key3 >=5 or key5 < 2) and (key5 < 5 or key6 < 6));
 
@@ -290,6 +300,10 @@ select * from t0 where key1 < 3 or key2 < 4;
 select count(*) from t0;
 
 # Test for BUG#4177
+
+# enable view-protocol after fix MDEV-27871
+--disable_view_protocol
+
 drop table t4;
 create table t4 (a int);
 insert into t4 values (1),(4),(3);
@@ -338,6 +352,8 @@ set join_buffer_size= @save_join_buffer_size;
 # Test for BUG#4177 ends
 
 drop table t0, t1, t2, t3, t4;
+
+--enable_view_protocol
 
 # BUG#16166
 CREATE TABLE t1 (
@@ -402,6 +418,7 @@ drop table t1, t2, t3;
 #
 # BUG#20256 - LOCK WRITE - MyISAM
 #
+--disable_service_connection
 CREATE TABLE t1(a INT);
 INSERT INTO t1 VALUES(1);
 CREATE TABLE t2(a INT, b INT, dummy CHAR(16) DEFAULT '', KEY(a), KEY(b));
@@ -430,6 +447,7 @@ INSERT INTO t2(a,b) VALUES(1,2);
 SELECT t2.a FROM t1,t2 WHERE t2.b=2 AND t2.a=1;
 UNLOCK TABLES;
 DROP TABLE t1, t2;
+--enable_service_connection
 
 #
 # BUG#29740: HA_KEY_SCAN_NOT_ROR wasn't set for HEAP engine

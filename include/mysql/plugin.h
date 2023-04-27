@@ -204,6 +204,18 @@ struct system_status_var;
 typedef int (*mysql_show_var_func)(MYSQL_THD, struct st_mysql_show_var*, void *, struct system_status_var *status_var, enum enum_var_type);
 
 
+static inline
+struct st_mysql_show_var SHOW_FUNC_ENTRY(const char *name,
+                                         mysql_show_var_func func_arg)
+{
+  struct st_mysql_show_var tmp;
+  tmp.name= name;
+  tmp.value= (void*) func_arg;
+  tmp.type= SHOW_FUNC;
+  return tmp;
+};
+
+
 /*
   Constants for plugin flags.
  */
@@ -233,6 +245,7 @@ typedef int (*mysql_show_var_func)(MYSQL_THD, struct st_mysql_show_var*, void *,
 #define PLUGIN_VAR_NOCMDARG     0x1000 /* No argument for cmd line */
 #define PLUGIN_VAR_RQCMDARG     0x0000 /* Argument required for cmd line */
 #define PLUGIN_VAR_OPCMDARG     0x2000 /* Argument optional for cmd line */
+#define PLUGIN_VAR_DEPRECATED   0x4000 /* Server variable is deprecated */
 #define PLUGIN_VAR_MEMALLOC     0x8000 /* String needs memory allocated */
 
 struct st_mysql_sys_var;
@@ -286,7 +299,8 @@ typedef void (*mysql_var_update_func)(MYSQL_THD thd,
 #define PLUGIN_VAR_MASK \
         (PLUGIN_VAR_READONLY | PLUGIN_VAR_NOSYSVAR | \
          PLUGIN_VAR_NOCMDOPT | PLUGIN_VAR_NOCMDARG | \
-         PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_MEMALLOC)
+         PLUGIN_VAR_OPCMDARG | PLUGIN_VAR_RQCMDARG | \
+         PLUGIN_VAR_DEPRECATED | PLUGIN_VAR_MEMALLOC)
 
 #define MYSQL_PLUGIN_VAR_HEADER \
   int flags;                    \

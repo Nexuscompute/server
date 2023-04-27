@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2000, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2021, MariaDB Corporation.
+Copyright (c) 2013, 2022, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -109,8 +109,6 @@ public:
 
 	double read_time(uint index, uint ranges, ha_rows rows) override;
 
-	int delete_all_rows() override;
-
 	int write_row(const uchar * buf) override;
 
 	int update_row(const uchar * old_data, const uchar * new_data) override;
@@ -192,12 +190,12 @@ public:
 
 	void update_create_info(HA_CREATE_INFO* create_info) override;
 
-	inline int create(
+	int create(
 		const char*		name,
 		TABLE*			form,
 		HA_CREATE_INFO*		create_info,
 		bool			file_per_table,
-		trx_t*			trx = NULL);
+		trx_t*			trx);
 
 	int create(
 		const char*		name,
@@ -227,7 +225,7 @@ public:
 
 	uint referenced_by_foreign_key() override;
 
-	void free_foreign_key_create_info(char* str) override;
+	void free_foreign_key_create_info(char* str) override { my_free(str); }
 
 	uint lock_count(void) const override;
 
@@ -244,7 +242,6 @@ public:
 		ulonglong		nb_desired_values,
 		ulonglong*		first_value,
 		ulonglong*		nb_reserved_values) override;
-	int reset_auto_increment(ulonglong value) override;
 
 	bool get_error_message(int error, String *buf) override;
 
@@ -425,15 +422,9 @@ public:
 	@retval	false if pushed (always) */
 	bool rowid_filter_push(Rowid_filter *rowid_filter) override;
 
-	bool
-	can_convert_string(const Field_string* field,
-			   const Column_definition& new_field) const override;
-	bool can_convert_varstring(
-	    const Field_varstring* field,
-	    const Column_definition& new_field) const override;
-	bool
-	can_convert_blob(const Field_blob* field,
-			 const Column_definition& new_field) const override;
+	bool can_convert_nocopy(const Field &field,
+				const Column_definition& new_field) const
+		override;
 
 	/** @return whether innodb_strict_mode is active */
 	static bool is_innodb_strict_mode(THD* thd);
@@ -448,6 +439,16 @@ public:
 			  const KEY_PART_INFO& new_part) const override;
 
 protected:
+	bool
+	can_convert_string(const Field_string* field,
+			   const Column_definition& new_field) const;
+	bool can_convert_varstring(
+	    const Field_varstring* field,
+	    const Column_definition& new_field) const;
+	bool
+	can_convert_blob(const Field_blob* field,
+			 const Column_definition& new_field) const;
+
 	dberr_t innobase_get_autoinc(ulonglong* value);
 	dberr_t innobase_lock_autoinc();
 	ulonglong innobase_peek_autoinc();
@@ -465,6 +466,10 @@ protected:
 
 	int general_fetch(uchar* buf, uint direction, uint match_mode);
 	int change_active_index(uint keynr);
+	/* @return true if it's necessary to switch current statement log
+	format from STATEMENT to ROW if binary log format is MIXED and
+	autoincrement values are changed in the statement */
+	bool autoinc_lock_mode_stmt_unsafe() const override;
 	dict_index_t* innobase_get_index(uint keynr);
 
 #ifdef WITH_WSREP
@@ -564,9 +569,6 @@ bool thd_is_strict_mode(const MYSQL_THD thd);
 extern void mysql_bin_log_commit_pos(THD *thd, ulonglong *out_pos, const char **out_file);
 
 struct trx_t;
-#ifdef WITH_WSREP
-#include <mysql/service_wsrep.h>
-#endif /* WITH_WSREP */
 
 extern const struct _ft_vft ft_vft_result;
 
@@ -641,8 +643,9 @@ public:
 	@param create_fk	whether to add FOREIGN KEY constraints */
 	int create_table(bool create_fk = true);
 
-	/** Update the internal data dictionary. */
-	int create_table_update_dict();
+  static void create_table_update_dict(dict_table_t* table, THD* thd,
+                                       const HA_CREATE_INFO& info,
+                                       const TABLE& t);
 
 	/** Validates the create options. Checks that the options
 	KEY_BLOCK_SIZE, ROW_FORMAT, DATA DIRECTORY, TEMPORARY & TABLESPACE
@@ -702,12 +705,13 @@ public:
 	trx_t* trx() const
 	{ return(m_trx); }
 
-	/** Return table name. */
-	const char* table_name() const
-	{ return(m_table_name); }
+	/** @return table name */
+	const char* table_name() const { return(m_table_name); }
 
-	THD* thd() const
-	{ return(m_thd); }
+	/** @return the created table */
+	dict_table_t *table() const { return m_table; }
+
+	THD* thd() const { return(m_thd); }
 
 private:
 	/** Parses the table name into normal name and either temp path or

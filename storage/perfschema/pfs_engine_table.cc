@@ -1,4 +1,4 @@
-/* Copyright (c) 2008, 2019, Oracle and/or its affiliates. All rights reserved.
+/* Copyright (c) 2008, 2022, Oracle and/or its affiliates.
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License, version 2.0,
@@ -48,6 +48,7 @@
 #include "table_file_summary_by_instance.h"
 #include "table_file_summary_by_event_name.h"
 #include "table_threads.h"
+//#include "table_processlist.h"
 
 #include "table_ews_by_host_by_event_name.h"
 #include "table_ews_by_user_by_event_name.h"
@@ -146,13 +147,13 @@ bool PFS_table_context::initialize(void)
   {
     /* Restore context from TLS. */
     PFS_table_context *context= static_cast<PFS_table_context *>(my_get_thread_local(m_thr_key));
-    DBUG_ASSERT(context != NULL);
+    assert(context != NULL);
 
     if(context)
     {
       m_last_version= context->m_current_version;
       m_map= context->m_map;
-      DBUG_ASSERT(m_map_size == context->m_map_size);
+      assert(m_map_size == context->m_map_size);
       m_map_size= context->m_map_size;
     }
   }
@@ -160,7 +161,7 @@ bool PFS_table_context::initialize(void)
   {
     /* Check that TLS is not in use. */
     PFS_table_context *context= static_cast<PFS_table_context *>(my_get_thread_local(m_thr_key));
-    //DBUG_ASSERT(context == NULL);
+    //assert(context == NULL);
 
     context= this;
 
@@ -333,8 +334,26 @@ static PFS_engine_table_share *all_shares[]=
   //&table_global_variables::m_share,
   //&table_session_variables::m_share,
 
+  //&table_processlist::m_share,
+
   NULL
 };
+
+/** Error reporting for schema integrity checks. */
+class PFS_silent_check_intact : public Table_check_intact
+{
+protected:
+  virtual void report_error(uint code, const char *fmt, ...) {}
+
+public:
+  PFS_silent_check_intact()
+  {}
+
+  ~PFS_silent_check_intact()
+  {}
+};
+
+
 
 /** Initialize all the table share locks. */
 void PFS_engine_table_share::init_all_locks(void)
@@ -525,28 +544,28 @@ void PFS_engine_table::get_normalizer(PFS_instr_class *instr_class)
 
 void PFS_engine_table::set_field_long(Field *f, long value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_LONG);
+  assert(f->real_type() == MYSQL_TYPE_LONG);
   Field_long *f2= (Field_long*) f;
   f2->store(value, false);
 }
 
 void PFS_engine_table::set_field_ulong(Field *f, ulong value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_LONG);
+  assert(f->real_type() == MYSQL_TYPE_LONG);
   Field_long *f2= (Field_long*) f;
   f2->store(value, true);
 }
 
 void PFS_engine_table::set_field_longlong(Field *f, longlong value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_LONGLONG);
+  assert(f->real_type() == MYSQL_TYPE_LONGLONG);
   Field_longlong *f2= (Field_longlong*) f;
   f2->store(value, false);
 }
 
 void PFS_engine_table::set_field_ulonglong(Field *f, ulonglong value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_LONGLONG);
+  assert(f->real_type() == MYSQL_TYPE_LONGLONG);
   Field_longlong *f2= (Field_longlong*) f;
   f2->store(value, true);
 }
@@ -554,7 +573,7 @@ void PFS_engine_table::set_field_ulonglong(Field *f, ulonglong value)
 void PFS_engine_table::set_field_char_utf8(Field *f, const char* str,
                                            uint len)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_STRING);
+  assert(f->real_type() == MYSQL_TYPE_STRING);
   Field_string *f2= (Field_string*) f;
   f2->store(str, len, &my_charset_utf8mb3_bin);
 }
@@ -564,7 +583,7 @@ void PFS_engine_table::set_field_varchar(Field *f,
                                          const char* str,
                                          uint len)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_VARCHAR);
+  assert(f->real_type() == MYSQL_TYPE_VARCHAR);
   Field_varstring *f2= (Field_varstring*) f;
   f2->store(str, len, cs);
 }
@@ -572,7 +591,7 @@ void PFS_engine_table::set_field_varchar(Field *f,
 void PFS_engine_table::set_field_varchar_utf8(Field *f, const char* str,
                                               uint len)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_VARCHAR);
+  assert(f->real_type() == MYSQL_TYPE_VARCHAR);
   Field_varstring *f2= (Field_varstring*) f;
   f2->store(str, len, &my_charset_utf8mb3_bin);
 }
@@ -580,7 +599,7 @@ void PFS_engine_table::set_field_varchar_utf8(Field *f, const char* str,
 void PFS_engine_table::set_field_longtext_utf8(Field *f, const char* str,
                                                uint len)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_BLOB);
+  assert(f->real_type() == MYSQL_TYPE_BLOB);
   Field_blob *f2= (Field_blob*) f;
   f2->store(str, len, &my_charset_utf8mb3_bin);
 }
@@ -588,14 +607,14 @@ void PFS_engine_table::set_field_longtext_utf8(Field *f, const char* str,
 void PFS_engine_table::set_field_blob(Field *f, const char* val,
                                       uint len)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_BLOB);
+  assert(f->real_type() == MYSQL_TYPE_BLOB);
   Field_blob *f2= (Field_blob*) f;
   f2->store(val, len, &my_charset_utf8mb3_bin);
 }
 
 void PFS_engine_table::set_field_enum(Field *f, ulonglong value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_ENUM);
+  assert(f->real_type() == MYSQL_TYPE_ENUM);
   Field_enum *f2= (Field_enum*) f;
   f2->store_type(value);
 }
@@ -609,14 +628,14 @@ void PFS_engine_table::set_field_timestamp(Field *f, ulonglong value)
 
 void PFS_engine_table::set_field_double(Field *f, double value)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_DOUBLE);
+  assert(f->real_type() == MYSQL_TYPE_DOUBLE);
   Field_double *f2= (Field_double*) f;
   f2->store(value);
 }
 
 ulonglong PFS_engine_table::get_field_enum(Field *f)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_ENUM);
+  assert(f->real_type() == MYSQL_TYPE_ENUM);
   Field_enum *f2= (Field_enum*) f;
   return f2->val_int();
 }
@@ -624,7 +643,7 @@ ulonglong PFS_engine_table::get_field_enum(Field *f)
 String*
 PFS_engine_table::get_field_char_utf8(Field *f, String *val)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_STRING);
+  assert(f->real_type() == MYSQL_TYPE_STRING);
   Field_string *f2= (Field_string*) f;
   val= f2->val_str(NULL, val);
   return val;
@@ -633,7 +652,7 @@ PFS_engine_table::get_field_char_utf8(Field *f, String *val)
 String*
 PFS_engine_table::get_field_varchar_utf8(Field *f, String *val)
 {
-  DBUG_ASSERT(f->real_type() == MYSQL_TYPE_VARCHAR);
+  assert(f->real_type() == MYSQL_TYPE_VARCHAR);
   Field_varstring *f2= (Field_varstring*) f;
   val= f2->val_str(NULL, val);
   return val;
@@ -651,11 +670,9 @@ int PFS_engine_table::update_row_values(TABLE *,
 class PFS_internal_schema_access : public ACL_internal_schema_access
 {
 public:
-  PFS_internal_schema_access()
-  {}
+  PFS_internal_schema_access() = default;
 
-  ~PFS_internal_schema_access()
-  {}
+  ~PFS_internal_schema_access() = default;
 
   ACL_internal_access_result check(privilege_t want_access,
                                    privilege_t *save_priv) const;
@@ -729,9 +746,10 @@ static bool allow_drop_table_privilege() {
     return false;
   }
 
-  DBUG_ASSERT(thd->lex != NULL);
+  assert(thd->lex != NULL);
   if ((thd->lex->sql_command != SQLCOM_TRUNCATE) &&
-      (thd->lex->sql_command != SQLCOM_GRANT)) {
+      (thd->lex->sql_command != SQLCOM_GRANT) &&
+      (thd->lex->sql_command != SQLCOM_REVOKE)) {
     return false;
   }
 
@@ -766,6 +784,33 @@ PFS_readonly_world_acl::check(privilege_t want_access, privilege_t *save_priv) c
     if (want_access == SELECT_ACL)
       res= ACL_INTERNAL_ACCESS_GRANTED;
   }
+  return res;
+}
+
+PFS_readonly_processlist_acl pfs_readonly_processlist_acl;
+
+ACL_internal_access_result PFS_readonly_processlist_acl::check(
+    privilege_t want_access, privilege_t *save_priv) const {
+  ACL_internal_access_result res =
+      PFS_readonly_acl::check(want_access, save_priv);
+
+  if ((res == ACL_INTERNAL_ACCESS_CHECK_GRANT) && (want_access == SELECT_ACL)) {
+    THD *thd = current_thd;
+    if (thd != NULL) {
+      if (thd->lex->sql_command == SQLCOM_SHOW_PROCESSLIST ||
+          thd->lex->sql_command == SQLCOM_SELECT) {
+        /*
+          For compatibility with the historical
+          SHOW PROCESSLIST command,
+          SHOW PROCESSLIST does not require a
+          SELECT privilege on table performance_schema.processlist,
+          when rewriting the query using table processlist.
+        */
+        return ACL_INTERNAL_ACCESS_GRANTED;
+      }
+    }
+  }
+
   return res;
 }
 
